@@ -38,7 +38,10 @@ pub fn plugin_files(roster: &Roster, version: &str, skill_template: &str) -> Res
     let agents: Vec<&Agent> = roster.entries().iter().map(|e| &e.agent).collect();
     let mut files = vec![
         (PathBuf::from(".claude-plugin/marketplace.json"), marketplace(version)),
-        (plugin_path(".claude-plugin/plugin.json"), claude_manifest(version, &agents)),
+        (
+            plugin_path(".claude-plugin/plugin.json"),
+            claude_manifest(version, &agents),
+        ),
         (plugin_path(".codex-plugin/plugin.json"), codex_manifest(version)),
         (plugin_path(".antigravity-plugin/plugin.json"), agy_manifest(version)),
         (PathBuf::from(SKILL_FILE), skill(skill_template, &agents)?),
