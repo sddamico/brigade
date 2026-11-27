@@ -1,3 +1,6 @@
+//! Process trees and lineages, read from `ps` so the same code works on Linux
+//! and macOS.
+//!
 //! Stopping a harness means stopping everything it started. Codex runs each
 //! tool command in a session of its own, out of reach of a signal to the
 //! harness's process group, and a command is reparented away from the harness
@@ -55,6 +58,41 @@ impl Tree {
                 libc::kill(pid, signal);
             }
         }
+    }
+}
+
+/// Whoever started this process, and whoever started them, as (pid, parent)
+/// links. A waiter compares it against the live table: when a link breaks, the
+/// caller is gone even if the shell in between survived. Claude Code runs Bash
+/// through a process of its own, so a killed host can leave the shell alive and
+/// reparented while the waiter's own parent never changes.
+#[derive(Debug)]
+pub struct Lineage {
+    links: Vec<(i32, i32)>,
+}
+
+const LINEAGE_DEPTH: usize = 3;
+
+impl Lineage {
+    pub fn of_self() -> Lineage {
+        let parents: HashMap<i32, i32> = process_table().into_iter().map(|(pid, ppid, _)| (pid, ppid)).collect();
+        let mut links = Vec::new();
+        let mut pid = std::process::id() as i32;
+        while links.len() < LINEAGE_DEPTH {
+            match parents.get(&pid) {
+                Some(&ppid) if ppid > 1 => {
+                    links.push((pid, ppid));
+                    pid = ppid;
+                }
+                _ => break,
+            }
+        }
+        Lineage { links }
+    }
+
+    pub fn is_broken(&self) -> bool {
+        let parents: HashMap<i32, i32> = process_table().into_iter().map(|(pid, ppid, _)| (pid, ppid)).collect();
+        self.links.iter().any(|(pid, ppid)| parents.get(pid) != Some(ppid))
     }
 }
 

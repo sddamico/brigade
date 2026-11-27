@@ -1,18 +1,21 @@
 use brigade::harness::{Access, Effort};
+use brigade::process::Lineage;
 use brigade::report::{self, WAIT_SLICE_SECS};
 use brigade::roster::Roster;
 use brigade::runs::{self, Outcome, RunDir, RunRecord, State};
 use brigade::settings::{MAX_DEPTH, Settings};
 use brigade::worktree;
 use clap::{Args, Parser, Subcommand};
+use std::cell::Cell;
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const STILL_RUNNING: u8 = 3;
 const INTERRUPTED_EXIT: u8 = 130;
+const ORPHAN_CHECK_EVERY: Duration = Duration::from_secs(2);
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -220,14 +223,22 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     })
 }
 
-/// True once whoever started this process has died. A waiter whose forwarder
+/// True once whoever started this process is gone. A waiter whose forwarder
 /// was killed outright lives on as an orphan, and must stop renewing the lease
 /// so the run is cancelled. It doesn't cancel by itself: a harness's shell
-/// timeout kills the waiter's parent too, and the forwarder then waits again.
+/// timeout kills the waiter's callers too, and the forwarder then waits again.
 fn orphan_check() -> impl Fn() -> bool {
-    // SAFETY: getppid can't fail.
-    let parent = unsafe { libc::getppid() };
-    move || unsafe { libc::getppid() } != parent
+    let lineage = Lineage::of_self();
+    let checked = Cell::new(Instant::now());
+    let broken = Cell::new(false);
+    move || {
+        // ps is a process per call; every couple of seconds is plenty.
+        if !broken.get() && checked.get().elapsed() >= ORPHAN_CHECK_EVERY {
+            checked.set(Instant::now());
+            broken.set(lineage.is_broken());
+        }
+        broken.get()
+    }
 }
 
 extern "C" fn on_interrupt(_: libc::c_int) {

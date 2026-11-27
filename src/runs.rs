@@ -10,7 +10,7 @@
 
 use crate::harness::{Access, Effort};
 use crate::invocation::{self, Request};
-use crate::kill::Tree;
+use crate::process::Tree;
 use crate::roster::Agent;
 use crate::settings::{DEPTH_VAR, Settings};
 use serde::{Deserialize, Serialize};
