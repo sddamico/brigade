@@ -32,7 +32,7 @@ An agent from your own harness's family runs on your ordinary subagents; brigade
 ### In Claude Code
 
 - opus, fable and sonnet: use the Agent tool as usual, with `model: "opus"` (or `fable`, `sonnet`) and `effort` if one was asked for
-- sol, astra, neon and hydrogen: `Agent(subagent_type: "brigade:<name>")`, a forwarder that runs the agent's own CLI. Put the routing in the prompt in plain words: "this is a write run", "use model `<id>`", "use effort high", "use your own worktree", or "continue session `<id>` in `<dir>`"
+- sol, astra, neon and hydrogen: `Agent(subagent_type: "brigade:<name>")`, a forwarder that runs the agent's own CLI. Put the routing in the prompt in plain words: "this is a write run", "use model `<id>`", "use effort high", "use your own worktree", or "continue session `<id>` in `<dir>`". Don't set `isolation` on a forwarder's Agent call: ask for a worktree in the prompt and brigade makes it
 - An agent from the user's roster, such as claude-local: `brigade:forward`, with `agent: <name>` as the first line of the prompt
 
 ### In Codex
@@ -65,7 +65,9 @@ That waits for the reply. `--detach` returns a run id at once instead; `brigade 
 
 A team is several runs of one agent at once, one task each. Split the work into pieces that don't depend on each other, start every member in the same turn, then collect the replies and combine them yourself. Check with the user before starting more than five.
 
-Read-only members can share the checkout. Write members each need their own worktree: `isolation: "worktree"` on Claude Code's Agent tool, `Workspace: "branch"` on agy's `invoke_subagent`, and "use your own worktree" for a forwarder, which then runs `brigade run --worktree`. Codex subagents have no worktree option, so a Codex write team of sol or astra goes through `forward` with "use your own worktree". A forwarder's reply names its worktree and branch. Review and merge those branches, then remove each worktree with `git worktree remove <path>`.
+Read-only members can share the checkout. Write members each need their own worktree: `isolation: "worktree"` on Claude Code's Agent tool for Claude's own subagents, `Workspace: "branch"` on agy's `invoke_subagent`, and "use your own worktree" in a forwarder's prompt, which then runs `brigade run --write --worktree`. Codex subagents have no worktree option, so a Codex write team of sol or astra goes through `forward` with "use your own worktree".
+
+A brigade worktree starts from HEAD on a branch `brigade/<run id>`, and brigade commits the run's changes on that branch when it finishes; the reply's `[brigade]` lines name the commit, branch and worktree. Merge or cherry-pick each branch, then remove it with `git worktree remove <path>` and `git branch -d <branch>`. A worktree has none of the checkout's uncommitted changes or gitignored files (`.env`, `node_modules`, build output), so commit what members need first, and expect them to install dependencies. A failed or cancelled run that changed nothing has its worktree and branch removed for it.
 
 Runs nest at most two deep: a brigade agent can start one more level of agents, and those can't start any.
 
@@ -75,8 +77,10 @@ Stopping a forwarder stops its run: a run that nobody has waited on for 90 secon
 
 ## Following up
 
-A reply that came through brigade ends with `[brigade]` lines: the run, and for a session the `brigade run ... --resume <session> --cwd <dir>` command that continues it. Pass the session and directory back to a forwarder ("continue session `<id>` in `<dir>`") or run that command yourself. To follow up with one of your own subagents, use your harness's tool (`SendMessage` in Claude Code, `followup_task` in Codex).
+A reply that came through brigade ends with `[brigade]` lines: the run, and for a session the `brigade run ... --resume <session> --cwd <dir>` command that continues it. Send the follow-up to the same forwarder (`SendMessage` in Claude Code, `followup_task` in Codex); it continues the session itself. A new forwarder needs the session and directory in its prompt ("continue session `<id>` in `<dir>`"), or you can run that command yourself. Follow up with your own native subagents the same way.
 
 ## Reporting back
+
+A forwarder's reply always ends with the `[brigade]` lines. One without them didn't come from brigade: the forwarder answered by itself. Don't use it or pass it on; start the agent again, or run `brigade run` from the shell.
 
 The user sees only what you relay. Say which agent did what, and pass on findings with their evidence. Don't present an agent's claims as checked unless you checked them.

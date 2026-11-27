@@ -1,4 +1,5 @@
 use brigade::harness::{Access, Effort};
+use brigade::invocation::{UnsetVar, expand};
 use brigade::process::Lineage;
 use brigade::report::{self, WAIT_SLICE_SECS};
 use brigade::roster::Roster;
@@ -71,8 +72,9 @@ struct RunArgs {
     /// Directory to run in; defaults to the current one
     #[arg(long, value_name = "DIR")]
     cwd: Option<PathBuf>,
-    /// Run in a new git worktree on its own branch, made from the HEAD of the cwd's repo
-    #[arg(long, conflicts_with = "resume")]
+    /// Run in a new git worktree on its own branch, made from the HEAD of the cwd's repo. Needs --write;
+    /// brigade commits the run's changes on that branch when it finishes
+    #[arg(long, conflicts_with = "resume", requires = "write")]
     worktree: bool,
     /// Continue the session a previous run printed
     #[arg(long, value_name = "SESSION")]
@@ -155,7 +157,11 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
             roster.names().join(", ")
         )
     })?;
-    let agent = entry.agent.clone();
+    let mut agent = entry.agent.clone();
+    // Expanded here so a missing variable is reported before anything starts,
+    // and the run's record names the model the harness really gets.
+    agent.model = expand(&agent.model, &env_var)
+        .map_err(|UnsetVar(name)| format!("`{}` needs ${name}, which isn't set", agent.name))?;
     let effort = args.effort.or(agent.effort);
     if effort.is_some_and(|e| !agent.harness.supports(e)) {
         let levels: Vec<&str> = agent.harness.efforts().iter().map(|e| e.as_str()).collect();
@@ -177,14 +183,20 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         .map_err(|e| format!("can't use {} as the cwd: {e}", cwd.display()))?;
 
     let (id, dir) = RunDir::allocate(settings, &agent.name)?;
-    let worktree = if args.worktree {
-        Some(worktree::create(settings, &cwd, &id)?)
+    let (worktree, cwd) = if args.worktree {
+        match worktree::create(settings, &cwd, &id) {
+            Ok((worktree, run_cwd)) => (Some(worktree), run_cwd),
+            Err(error) => {
+                dir.discard();
+                return Err(error);
+            }
+        }
     } else {
-        None
+        (worktree::existing(settings, &cwd), cwd)
     };
     let record = RunRecord {
         id,
-        cwd: worktree.as_ref().map(|w| w.path.clone()).unwrap_or(cwd),
+        cwd,
         model: args.model.unwrap_or_else(|| agent.model.clone()),
         agent,
         effort,
@@ -199,7 +211,7 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     if args.detach {
         runs::spawn_worker(&record, &dir)?;
         if args.json {
-            print!("{}", report::state_json(&record, &State::Running, dir.path()));
+            print!("{}", report::state_json(&record, &State::Running, dir.path(), None));
         } else {
             print!("{}", report::started(&record));
         }
@@ -257,24 +269,36 @@ fn trap_interrupt() {
 
 fn print_state(record: &RunRecord, dir: &RunDir, state: &State, json: bool, waited: u64) -> ExitCode {
     if json {
-        print!("{}", report::state_json(record, state, dir.path()));
+        print!(
+            "{}",
+            report::state_json(record, state, dir.path(), dir.worktree_state().as_ref())
+        );
     }
     match state {
         State::Finished(Outcome::Done { session, message }) => {
             if !json {
-                print!("{}", report::done(record, session.as_deref(), message));
+                print!(
+                    "{}",
+                    report::done(record, session.as_deref(), message, dir.worktree_state().as_ref())
+                );
             }
             ExitCode::SUCCESS
         }
         State::Finished(Outcome::Failed { error }) => {
             if !json {
-                eprint!("{}", report::failed(record, error, dir.path()));
+                eprint!(
+                    "{}",
+                    report::failed(record, error, dir.path(), dir.worktree_state().as_ref())
+                );
             }
             ExitCode::FAILURE
         }
         State::Finished(Outcome::Cancelled { reason }) => {
             if !json {
-                eprint!("{}", report::cancelled(record, reason, dir.path()));
+                eprint!(
+                    "{}",
+                    report::cancelled(record, reason, dir.path(), dir.worktree_state().as_ref())
+                );
             }
             ExitCode::FAILURE
         }

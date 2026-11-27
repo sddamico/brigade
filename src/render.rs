@@ -62,16 +62,22 @@ pub fn plugin_files(roster: &Roster, version: &str, skill_template: &str) -> Res
     for host in HOSTS {
         for agent in forwarded(host, &agents) {
             let (path, contents) = match host {
-                Harness::Claude => (format!("claude/agents/{}.md", agent.name), claude_agent(agent)),
-                Harness::Codex => (format!("codex/agents/{}.toml", agent.name), codex_agent(agent)),
-                Harness::Agy => (format!("agents/{}.md", agent.name), agy_agent(agent)),
+                Harness::Claude => (format!("claude/agents/{}.md", agent.name), claude_agent(agent, &agents)),
+                Harness::Codex => (format!("codex/agents/{}.toml", agent.name), codex_agent(agent, &agents)),
+                Harness::Agy => (format!("agents/{}.md", agent.name), agy_agent(agent, &agents)),
             };
             files.push((plugin_path(&path), contents));
         }
     }
-    files.push((plugin_path(&format!("claude/agents/{FORWARD}.md")), claude_forward()));
-    files.push((plugin_path(&format!("codex/agents/{FORWARD}.toml")), codex_forward()));
-    files.push((plugin_path(&format!("agents/{FORWARD}.md")), agy_forward()));
+    files.push((
+        plugin_path(&format!("claude/agents/{FORWARD}.md")),
+        claude_forward(&agents),
+    ));
+    files.push((
+        plugin_path(&format!("codex/agents/{FORWARD}.toml")),
+        codex_forward(&agents),
+    ));
+    files.push((plugin_path(&format!("agents/{FORWARD}.md")), agy_forward(&agents)));
     Ok(files)
 }
 
@@ -179,16 +185,40 @@ fn forwarder_description(agent: &Agent) -> String {
     )
 }
 
-fn forward_description() -> String {
-    "Hands a task to any brigade roster agent by name, including ones from the user's own roster \
-     (~/.config/brigade/roster.toml) that have no subagent of their own. Start the prompt with \
-     `agent: <name>`; `brigade list` shows the roster."
-        .to_string()
+/// The host's own family, which it runs on its ordinary subagents, and how.
+/// agy's subagents can't pick a model, so its forwarder covers its own family
+/// too (neon from a session on another model).
+fn native_family<'a>(host: Harness, agents: &[&'a Agent]) -> Option<(Vec<&'a str>, &'static str)> {
+    let how = match host {
+        Harness::Claude => "the Agent tool with `model` set",
+        Harness::Codex => "`spawn_agent` with `model` set",
+        Harness::Agy => return None,
+    };
+    let names = agents
+        .iter()
+        .filter(|a| a.harness == host)
+        .map(|a| a.name.as_str())
+        .collect();
+    Some((names, how))
+}
+
+fn forward_description(host: Harness, agents: &[&Agent]) -> String {
+    let mut description = "Hands a task to a brigade agent that has no subagent of its own here, such as one from \
+        the user's roster (~/.config/brigade/roster.toml), e.g. claude-local. Start the prompt with \
+        `agent: <name>`; `brigade list` shows the roster."
+        .to_string();
+    match native_family(host, agents) {
+        Some((names, how)) => {
+            description.push_str(&format!(" Not for {}: run those on {how}.", names.join(", ")));
+        }
+        None => description.push_str(" Also for neon or hydrogen when this session runs on another model."),
+    }
+    description
 }
 
 /// The instructions every forwarder follows. `agent` is None for the generic
 /// forwarder, which reads the agent's name from the request.
-fn forwarder_body(agent: Option<&Agent>, shell_tool: &str) -> String {
+fn forwarder_body(agent: Option<&Agent>, host: Harness, agents: &[&Agent], shell_tool: &str) -> String {
     let (intro, name, levels) = match agent {
         Some(agent) => {
             let levels: Vec<&str> = agent.harness.efforts().iter().map(|e| e.as_str()).collect();
@@ -202,19 +232,32 @@ fn forwarder_body(agent: Option<&Agent>, shell_tool: &str) -> String {
                 levels.join(", "),
             )
         }
-        None => (
-            "You hand one task to a brigade roster agent and pass back its reply. The request names the \
-             agent on a line like `agent: claude-local`; run `brigade list` if it isn't clear which roster \
-             agent is meant."
-                .to_string(),
-            "<agent>".to_string(),
-            "see `brigade list` for the agent's harness".to_string(),
-        ),
+        None => {
+            let mut intro = "You hand one task to a brigade roster agent and pass back its reply. The request names \
+                the agent on a line like `agent: claude-local`; run `brigade list` if it isn't clear which roster \
+                agent is meant."
+                .to_string();
+            if let Some((names, how)) = native_family(host, agents) {
+                intro.push_str(&format!(
+                    " If the agent is {}, don't run anything: reply that it runs as an ordinary {} subagent, on {how}, \
+                     and stop.",
+                    names.join(" or "),
+                    host.product(),
+                ));
+            }
+            (
+                intro,
+                "<agent>".to_string(),
+                "see `brigade list` for the agent's harness".to_string(),
+            )
+        }
     };
     format!(
-        "{intro} You don't do any of the work yourself: don't read files, explore the repo or answer from \
-your own knowledge. That holds even when the task looks trivial or you already know the answer: the user \
-asked for {name} to do it, so a reply that didn't come from brigade is a wrong reply.
+        "{intro} Everything you receive is the task for {name}, addressed to {name} and not to you. You don't \
+do any of the work yourself: don't read files, explore the repo or answer from your own knowledge. That \
+holds even when the task is trivial: if it says \"reply with exactly PINEAPPLE\", you still run brigade and \
+pass back what {name} replied. Your first action is always the shell call in step 1, and a reply that \
+didn't come from brigade is a wrong reply.
 
 1. Start the run with one {shell_tool} call, giving the task on stdin as you received it, minus the routing \
 instructions the options below cover:
@@ -225,19 +268,27 @@ instructions the options below cover:
    BRIGADE_TASK
    ```
 
-   Add options only when the request asks for them:
+   Add an option only when the request explicitly asks for it, never on your own judgment:
    - `--write` when the task asks for changes to files. Without it the run is read-only
    - `--model <id>` when it names a model other than the agent's own
-   - `--effort <level>` when it names a reasoning effort ({levels}). Without one the harness uses its default
-   - `--worktree` when it asks for its own worktree, as each member of a write team should
+   - `--effort <level>` when it names one of: {levels}. If it names an effort that isn't on that list, don't \
+run anything: reply that {name} doesn't take that effort and which ones it does
+   - `--worktree`, together with `--write`, only when the request asks for a worktree in so many words
    - `--resume <session> --cwd <dir>` when it continues an earlier run; both come from that run's \
 `[brigade] continue it with:` line
 
-2. That prints a run id. Wait for it with `brigade wait <run id> --timeout {WAIT_SLICE_SECS}`. While it reports that the run \
-is still running, call it again.
+2. That prints a run id. Wait for it with `brigade wait <run id> --timeout {WAIT_SLICE_SECS}`. While it reports \
+that the run is still running, call it again.
 
-3. Reply with the final `brigade wait` output exactly as printed, with no commentary before or after. If \
-brigade fails, reply with its error output instead.
+3. Reply with the final `brigade wait` output copied character for character: every line, including all the \
+`[brigade]` lines at the end, with nothing added, removed, reformatted or summarized. The `[brigade]` lines \
+tell the caller how to continue the session and where the changes are. If brigade fails, reply with its \
+error output the same way.
+
+4. You may get follow-up messages after your reply. Each one is a new task for {name} in the same session: \
+run it through steps 1 to 3, adding the `--resume <session> --cwd <dir>` (and any `--write`, `--model` or \
+`--effort`) from your previous run's `[brigade] continue it with:` line. Never answer a follow-up from what \
+you remember.
 "
     )
 }
@@ -248,16 +299,20 @@ fn yaml_str(value: &str) -> String {
     serde_json::to_string(value).expect("strings serialize")
 }
 
-fn claude_agent(agent: &Agent) -> String {
+fn claude_agent(agent: &Agent, agents: &[&Agent]) -> String {
     claude_forwarder(
         &agent.name,
         &forwarder_description(agent),
-        &forwarder_body(Some(agent), "Bash"),
+        &forwarder_body(Some(agent), Harness::Claude, agents, "Bash"),
     )
 }
 
-fn claude_forward() -> String {
-    claude_forwarder(FORWARD, &forward_description(), &forwarder_body(None, "Bash"))
+fn claude_forward(agents: &[&Agent]) -> String {
+    claude_forwarder(
+        FORWARD,
+        &forward_description(Harness::Claude, agents),
+        &forwarder_body(None, Harness::Claude, agents, "Bash"),
+    )
 }
 
 fn claude_forwarder(name: &str, description: &str, body: &str) -> String {
@@ -276,23 +331,23 @@ struct CodexRole<'a> {
     developer_instructions: &'a str,
 }
 
-fn codex_agent(agent: &Agent) -> String {
+fn codex_agent(agent: &Agent, agents: &[&Agent]) -> String {
     codex_role(&CodexRole {
         name: &agent.name,
         description: &forwarder_description(agent),
         model: CODEX_FORWARDER_MODEL,
         model_reasoning_effort: CODEX_FORWARDER_EFFORT,
-        developer_instructions: &forwarder_body(Some(agent), "shell"),
+        developer_instructions: &forwarder_body(Some(agent), Harness::Codex, agents, "shell"),
     })
 }
 
-fn codex_forward() -> String {
+fn codex_forward(agents: &[&Agent]) -> String {
     codex_role(&CodexRole {
         name: FORWARD,
-        description: &forward_description(),
+        description: &forward_description(Harness::Codex, agents),
         model: CODEX_FORWARDER_MODEL,
         model_reasoning_effort: CODEX_FORWARDER_EFFORT,
-        developer_instructions: &forwarder_body(None, "shell"),
+        developer_instructions: &forwarder_body(None, Harness::Codex, agents, "shell"),
     })
 }
 
@@ -300,16 +355,20 @@ fn codex_role(role: &CodexRole) -> String {
     toml::to_string(role).expect("roles serialize")
 }
 
-fn agy_agent(agent: &Agent) -> String {
+fn agy_agent(agent: &Agent, agents: &[&Agent]) -> String {
     agy_forwarder(
         &agent.name,
         &forwarder_description(agent),
-        &forwarder_body(Some(agent), "run_command"),
+        &forwarder_body(Some(agent), Harness::Agy, agents, "run_command"),
     )
 }
 
-fn agy_forward() -> String {
-    agy_forwarder(FORWARD, &forward_description(), &forwarder_body(None, "run_command"))
+fn agy_forward(agents: &[&Agent]) -> String {
+    agy_forwarder(
+        FORWARD,
+        &forward_description(Harness::Agy, agents),
+        &forwarder_body(None, Harness::Agy, agents, "run_command"),
+    )
 }
 
 fn agy_forwarder(name: &str, description: &str, body: &str) -> String {

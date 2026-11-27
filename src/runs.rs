@@ -13,6 +13,7 @@ use crate::invocation::{self, Request};
 use crate::process::Tree;
 use crate::roster::Agent;
 use crate::settings::{DEPTH_VAR, Settings};
+use crate::worktree::{self, Worktree, WorktreeState};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -43,12 +44,6 @@ pub struct RunRecord {
     /// The depth the worker runs at, one more than whoever started it.
     pub depth: u32,
     pub started_at: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Worktree {
-    pub path: PathBuf,
-    pub branch: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,6 +93,16 @@ impl RunDir {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Drops a run that never started.
+    pub fn discard(self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+
+    pub fn worktree_state(&self) -> Option<WorktreeState> {
+        let text = fs::read_to_string(self.file("worktree.json")).ok()?;
+        serde_json::from_str(&text).ok()
     }
 
     pub fn file(&self, name: &str) -> PathBuf {
@@ -233,10 +238,21 @@ pub fn spawn_worker(record: &RunRecord, dir: &RunDir) -> Result<Child, String> {
 /// The worker's job: runs the harness CLI for `record` until it exits, the run
 /// is cancelled or its lease lapses, and records the outcome.
 pub fn execute(record: &RunRecord, dir: &RunDir, lease: Duration, var: &dyn Fn(&str) -> Option<String>) -> Outcome {
-    let outcome = match dir.task() {
-        Ok(task) => run_harness(record, dir, &task, lease, var),
-        Err(error) => Outcome::Failed { error },
+    let task = dir.task();
+    let outcome = match &task {
+        Ok(task) => run_harness(record, dir, task, lease, var),
+        Err(error) => Outcome::Failed { error: error.clone() },
     };
+    if let Some(worktree) = &record.worktree {
+        let state = match &outcome {
+            Outcome::Done { .. } => worktree::commit(worktree, &commit_message(record, task.as_deref().unwrap_or(""))),
+            Outcome::Failed { .. } | Outcome::Cancelled { .. } => worktree::tidy(worktree),
+        };
+        let _ = write_atomic(
+            &dir.file("worktree.json"),
+            &serde_json::to_vec_pretty(&state).expect("states serialize"),
+        );
+    }
     // A `brigade cancel` that gave up on the worker may have recorded the
     // outcome already.
     if dir.outcome().is_none()
@@ -369,6 +385,11 @@ fn run_harness(
             }
         }
     }
+}
+
+fn commit_message(record: &RunRecord, task: &str) -> String {
+    let summary: String = task.lines().next().unwrap_or("").chars().take(72).collect();
+    format!("brigade: {} run {}\n\n{summary}\n", record.agent.name, record.id)
 }
 
 /// SIGTERM to everything the harness started, then SIGKILL to whatever is left.

@@ -22,6 +22,7 @@ if [ -n "$FAKE_DETACHED_CHILD" ]; then
   echo $! > "$log/detached-child"
 fi
 [ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
+[ -n "$FAKE_WRITE" ] && printf 'changed\n' > "$FAKE_WRITE"
 if [ -n "$FAKE_FAIL" ]; then echo "fake $name: $FAKE_FAIL" >&2; exit 1; fi
 case "$name" in
   claude) echo '{"type":"result","subtype":"success","is_error":false,"result":"claude reply","session_id":"claude-session"}' ;;
@@ -83,6 +84,10 @@ impl Sandbox {
             .env("XDG_STATE_HOME", self.root().join("state"))
             .env("FAKE_LOG", self.root().join("calls"))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
             .stdin(Stdio::null());
         command
     }
@@ -266,43 +271,155 @@ fn a_failing_harness_reports_its_error_and_logs() {
     assert!(err.contains("[brigade] logs: "), "{err}");
 }
 
-#[test]
-fn write_team_members_get_their_own_worktree() {
-    let sandbox = Sandbox::new();
-    let work = sandbox.work();
-    let git = |args: &[&str]| {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(&work)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "t")
-            .env("GIT_AUTHOR_EMAIL", "t@example.com")
-            .env("GIT_COMMITTER_NAME", "t")
-            .env("GIT_COMMITTER_EMAIL", "t@example.com")
-            .status()
-            .unwrap();
-        assert!(status.success());
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
 
-    let output = sandbox.brigade(&["run", "hydrogen", "--write", "--worktree", "build", "it"]);
+impl Sandbox {
+    /// Makes the sandbox's work dir a repo with one commit and a `pkg/` subdirectory.
+    fn repo(&self) -> PathBuf {
+        let work = self.work();
+        git_in(&work, &["init", "-q", "-b", "main"]);
+        fs::create_dir_all(work.join("pkg")).unwrap();
+        fs::write(work.join("pkg/inner.txt"), "v1\n").unwrap();
+        git_in(&work, &["add", "-A"]);
+        git_in(&work, &["commit", "-q", "-m", "start"]);
+        work
+    }
+}
+
+#[test]
+fn a_write_run_in_a_worktree_commits_its_changes_on_its_branch() {
+    let sandbox = Sandbox::new();
+    let work = sandbox.repo();
+    let output = sandbox
+        .command(&["run", "hydrogen", "--write", "--worktree", "build", "it"])
+        .current_dir(work.join("pkg"))
+        .env("FAKE_WRITE", "made.txt")
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{}", stderr(&output));
     let out = stdout(&output);
-    let worktree = PathBuf::from(sandbox.call("agy", "cwd").trim());
+
+    // It ran in the same subdirectory of the worktree that it was started from.
+    let cwd = PathBuf::from(sandbox.call("agy", "cwd").trim());
+    let worktree = cwd.parent().unwrap().to_path_buf();
+    assert!(cwd.ends_with("pkg"), "{}", cwd.display());
+    assert!(worktree.starts_with(sandbox.root().join("state/brigade/worktrees/work")));
+
+    let branch = git_in(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .trim()
+        .to_string();
+    assert!(branch.starts_with("brigade/hydrogen-"), "{branch}");
     assert!(
-        worktree.starts_with(sandbox.root().join("state/brigade/worktrees/work")),
-        "{}",
-        worktree.display()
-    );
-    assert!(
-        out.contains(&format!(
-            "its changes are in worktree {} on branch brigade/hydrogen-",
-            worktree.display()
-        )),
+        out.contains(&format!("on branch {branch}, in worktree {}", worktree.display())),
         "{out}"
     );
+    assert!(out.contains("[brigade] its changes are committed as "), "{out}");
+    assert_eq!(
+        git_in(&work, &["log", "--format=%s", &format!("main..{branch}")]).trim(),
+        format!("brigade: hydrogen run {}", branch.trim_start_matches("brigade/"))
+    );
+    assert!(git_in(&worktree, &["status", "--porcelain"]).is_empty());
+    assert!(!work.join("pkg/made.txt").exists(), "the main checkout was changed");
     assert!(!sandbox.args("agy").contains(&"--settings".to_string()));
+
+    // A follow-up in the worktree still names it.
+    let resume_line = out
+        .lines()
+        .find(|l| l.starts_with("[brigade] continue it with: "))
+        .unwrap();
+    let mut words: Vec<String> = resume_line
+        .trim_start_matches("[brigade] continue it with: brigade ")
+        .split(' ')
+        .map(String::from)
+        .collect();
+    words.push("more".into());
+    let args: Vec<&str> = words.iter().map(String::as_str).collect();
+    let followup = sandbox.command(&args).env("FAKE_WRITE", "more.txt").output().unwrap();
+    assert!(followup.status.success(), "{}", stderr(&followup));
+    assert!(
+        stdout(&followup).contains(&format!("on branch {branch}, in worktree {}", worktree.display())),
+        "{}",
+        stdout(&followup)
+    );
+}
+
+#[test]
+fn a_worktree_needs_a_write_run_and_a_commit_to_start_from() {
+    let sandbox = Sandbox::new();
+    let read_only = sandbox.brigade(&["run", "neon", "--worktree", "look"]);
+    assert_eq!(read_only.status.code(), Some(2));
+    assert!(stderr(&read_only).contains("--write"), "{}", stderr(&read_only));
+
+    git_in(&sandbox.work(), &["init", "-q", "-b", "main"]);
+    let empty = sandbox.brigade(&["run", "neon", "--write", "--worktree", "go"]);
+    assert!(
+        stderr(&empty).contains("--worktree needs a commit to branch from"),
+        "{}",
+        stderr(&empty)
+    );
+    let runs = sandbox.root().join("state/brigade/runs");
+    assert_eq!(
+        fs::read_dir(&runs).map(|d| d.count()).unwrap_or(0),
+        0,
+        "a refused run left a run dir"
+    );
+}
+
+#[test]
+fn a_failed_worktree_run_cleans_up_only_when_it_changed_nothing() {
+    let sandbox = Sandbox::new();
+    let work = sandbox.repo();
+    let failed = sandbox
+        .command(&["run", "sol", "--write", "--worktree", "go"])
+        .env("FAKE_FAIL", "boom")
+        .output()
+        .unwrap();
+    assert!(
+        stderr(&failed).contains("it left no changes, so its worktree and branch brigade/sol-"),
+        "{}",
+        stderr(&failed)
+    );
+    assert!(!git_in(&work, &["branch", "--list", "brigade/*"]).contains("brigade/"));
+
+    let messy = sandbox
+        .command(&["run", "sol", "--write", "--worktree", "go"])
+        .env("FAKE_FAIL", "boom")
+        .env("FAKE_WRITE", "half.txt")
+        .output()
+        .unwrap();
+    assert!(stderr(&messy).contains("is still there"), "{}", stderr(&messy));
+    assert!(git_in(&work, &["branch", "--list", "brigade/*"]).contains("brigade/sol-"));
+}
+
+#[test]
+fn a_worktree_run_notes_uncommitted_changes_it_left_out() {
+    let sandbox = Sandbox::new();
+    let work = sandbox.repo();
+    fs::write(work.join("pkg/inner.txt"), "v2 in progress\n").unwrap();
+    let output = sandbox.brigade(&["run", "opus", "--write", "--worktree", "go"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("note: the worktree started from HEAD, so uncommitted changes in"),
+        "{}",
+        stdout(&output)
+    );
 }
 
 #[test]
