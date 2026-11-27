@@ -16,7 +16,9 @@ pub struct Agent {
     pub name: String,
     pub harness: Harness,
     pub model: String,
-    pub effort: Effort,
+    /// None leaves the effort to the harness's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
     pub description: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
@@ -166,20 +168,16 @@ fn parse_agents(text: &str, origin: &str) -> Result<Vec<Agent>, RosterError> {
         if !seen.insert(agent.name.as_str()) {
             return Err(invalid(agent, "is defined twice".into()));
         }
-        if !agent.harness.supports(agent.effort) {
-            let levels: Vec<&str> = agent.harness.efforts().iter().map(|e| e.as_str()).collect();
-            return Err(invalid(
-                agent,
-                format!(
-                    "has effort `{}`, but {} takes {}",
-                    agent.effort,
-                    agent.harness,
-                    levels.join(", ")
-                ),
-            ));
+        if let Some(effort) = agent.effort.filter(|e| !agent.harness.supports(*e)) {
+            return Err(invalid(agent, unsupported_effort(agent.harness, effort)));
         }
     }
     Ok(file.agent)
+}
+
+pub fn unsupported_effort(harness: Harness, effort: Effort) -> String {
+    let levels: Vec<&str> = harness.efforts().iter().map(|e| e.as_str()).collect();
+    format!("has effort `{effort}`, but {harness} takes {}", levels.join(", "))
 }
 
 fn is_valid_name(name: &str) -> bool {

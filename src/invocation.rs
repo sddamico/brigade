@@ -16,7 +16,10 @@ const AGY_READ_ONLY_SETTINGS: &str = r#"{"permissions":{"deny":["write_file(*)",
 
 pub struct Request<'a> {
     pub agent: &'a Agent,
-    pub effort: Effort,
+    /// The agent's model unless the call overrides it, before $VAR expansion.
+    pub model: &'a str,
+    /// None leaves the effort to the harness's own default.
+    pub effort: Option<Effort>,
     pub access: Access,
     pub cwd: &'a Path,
     pub resume: Option<&'a str>,
@@ -45,7 +48,7 @@ pub struct Reply {
 
 pub fn build(req: &Request, var: &dyn Fn(&str) -> Option<String>) -> Result<Invocation, UnsetVar> {
     let agent = req.agent;
-    let model = expand(&agent.model, var)?;
+    let model = expand(req.model, var)?;
     let extra = agent
         .args
         .iter()
@@ -60,23 +63,18 @@ pub fn build(req: &Request, var: &dyn Fn(&str) -> Option<String>) -> Result<Invo
         Access::ReadOnly => format!("{READ_ONLY_NOTE}{}", req.task),
         Access::Write => req.task.to_string(),
     };
-    let effort = req.effort.as_str();
     let read_only = req.access == Access::ReadOnly;
 
     let mut args = Vec::new();
     let mut stdin = String::new();
+    let effort = req.effort.map(|e| e.as_str());
     match agent.harness {
         Harness::Claude => {
-            args.extend(strings(&[
-                "-p",
-                "--model",
-                &model,
-                "--effort",
-                effort,
-                "--output-format",
-                "json",
-                "--dangerously-skip-permissions",
-            ]));
+            args.extend(strings(&["-p", "--model", &model]));
+            if let Some(effort) = effort {
+                args.extend(strings(&["--effort", effort]));
+            }
+            args.extend(strings(&["--output-format", "json", "--dangerously-skip-permissions"]));
             if read_only {
                 args.extend(strings(&["--disallowedTools", CLAUDE_EDIT_TOOLS]));
             }
@@ -87,15 +85,13 @@ pub fn build(req: &Request, var: &dyn Fn(&str) -> Option<String>) -> Result<Invo
             stdin = prompt;
         }
         Harness::Codex => {
-            let effort_config = format!("model_reasoning_effort={effort}");
             let cwd = req.cwd.to_string_lossy();
             let last_message = req.last_message_file.to_string_lossy();
+            args.extend(strings(&["exec", "-m", &model]));
+            if let Some(effort) = effort {
+                args.extend(["-c".to_string(), format!("model_reasoning_effort={effort}")]);
+            }
             args.extend(strings(&[
-                "exec",
-                "-m",
-                &model,
-                "-c",
-                &effort_config,
                 "-C",
                 &cwd,
                 "--skip-git-repo-check",
@@ -120,15 +116,11 @@ pub fn build(req: &Request, var: &dyn Fn(&str) -> Option<String>) -> Result<Invo
             // agy has no stdin prompt, and a bare `-p <prompt>` is rejected when
             // the prompt starts with a dash.
             args.push(format!("--print={prompt}"));
-            args.extend(strings(&[
-                "--model",
-                &model,
-                "--effort",
-                effort,
-                "--output-format",
-                "json",
-                "--dangerously-skip-permissions",
-            ]));
+            args.extend(strings(&["--model", &model]));
+            if let Some(effort) = effort {
+                args.extend(strings(&["--effort", effort]));
+            }
+            args.extend(strings(&["--output-format", "json", "--dangerously-skip-permissions"]));
             if read_only {
                 args.extend(strings(&["--settings", AGY_READ_ONLY_SETTINGS]));
             }
@@ -138,7 +130,6 @@ pub fn build(req: &Request, var: &dyn Fn(&str) -> Option<String>) -> Result<Invo
             args.extend(extra);
         }
     }
-
     Ok(Invocation {
         program: agent.harness.program().to_string(),
         args,
@@ -269,7 +260,7 @@ mod tests {
             name: "a".into(),
             harness,
             model: model.into(),
-            effort: Effort::Medium,
+            effort: None,
             description: String::new(),
             env: BTreeMap::new(),
             args: Vec::new(),
@@ -279,7 +270,8 @@ mod tests {
     fn invocation(agent: &Agent, access: Access, resume: Option<&str>) -> Invocation {
         let req = Request {
             agent,
-            effort: Effort::High,
+            model: &agent.model,
+            effort: Some(Effort::High),
             access,
             cwd: Path::new("/repo"),
             resume,
@@ -362,7 +354,8 @@ mod tests {
             .insert("ANTHROPIC_BASE_URL".into(), "${LOCAL_MODEL_SERVER}/v1".into());
         let req = Request {
             agent: &a,
-            effort: Effort::Medium,
+            model: &a.model,
+            effort: None,
             access: Access::Write,
             cwd: Path::new("/repo"),
             resume: None,
@@ -448,5 +441,32 @@ mod tests {
         );
         let err = r#"{"conversation_id":"c-1","status":"ERROR","error":"quota exhausted","finished_reason":"error"}"#;
         assert_eq!(parse(Harness::Agy, err, None), Err("quota exhausted".into()));
+    }
+
+    #[test]
+    fn without_an_effort_no_harness_gets_an_effort_flag() {
+        for harness in [Harness::Claude, Harness::Codex, Harness::Agy] {
+            let a = agent(harness, "m");
+            let req = Request {
+                agent: &a,
+                model: "override-model",
+                effort: None,
+                access: Access::Write,
+                cwd: Path::new("/repo"),
+                resume: None,
+                task: "t",
+                last_message_file: Path::new("/x"),
+            };
+            let inv = build(&req, &|_| None).unwrap();
+            assert!(
+                !inv.args
+                    .iter()
+                    .any(|arg| arg == "--effort" || arg.starts_with("model_reasoning_effort")),
+                "{harness}: {:?}",
+                inv.args
+            );
+            let flag = if harness == Harness::Codex { "-m" } else { "--model" };
+            assert!(has_pair(&inv.args, flag, "override-model"), "{harness}: {:?}", inv.args);
+        }
     }
 }

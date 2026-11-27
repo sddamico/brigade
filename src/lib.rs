@@ -1,5 +1,6 @@
 pub mod harness;
 pub mod invocation;
+pub mod kill;
 pub mod render;
 pub mod report;
 pub mod roster;

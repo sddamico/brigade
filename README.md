@@ -19,15 +19,17 @@ brigade is two pieces:
 - A CLI, `brigade`, that runs a task on a roster agent headless (`claude -p`, `codex exec`, `agy -p`) and prints its final reply, plus a session id to continue it with
 - A plugin for all three harnesses. It has a skill that teaches the host agent the roster and how to start agents, and a subagent definition per agent in each harness's own format
 
-When the host is the agent's own harness and can pin the model, the subagent is native: `brigade:opus` in Claude Code is a Claude subagent on Opus, and `sol` in Codex is a Codex role on `gpt-6.2-sol`. Everything else is a forwarder, a subagent on the host's cheapest model that hands the task to `brigade run` and returns the reply unchanged. agy can only pin model tiers, not model ids, so every agent is a forwarder there.
+brigade only stands in for agents that live in another CLI. An agent from the host's own family stays on the host's ordinary subagents: opus in Claude Code is the Agent tool with `model: "opus"`, and sol in Codex is `spawn_agent` with `model: "gpt-6.2-sol"`. Every other agent gets a forwarder, a subagent on the host's cheapest model that hands the task to `brigade run` and returns the reply unchanged.
 
-| Host | Starts an agent with | Native agents |
+| Host | Its own agents (no brigade) | Through a brigade forwarder |
 |---|---|---|
-| Claude Code | `Agent(subagent_type: "brigade:<name>")` | opus, fable, sonnet |
-| Codex | `spawn_agent(agent_type: "<name>")` | sol, astra |
-| agy | `invoke_subagent(TypeName: "<name>")` | none |
+| Claude Code | opus, fable, sonnet | sol, astra, neon, hydrogen: `Agent(subagent_type: "brigade:<name>")` |
+| Codex | sol, astra | opus, fable, sonnet, neon, hydrogen: `spawn_agent(agent_type: "<name>")` |
+| agy | neon, hydrogen | opus, fable, sonnet, sol, astra: `invoke_subagent(TypeName: "<name>")` |
 
-Runs are read-only unless asked to write. A run with `--worktree` gets its own git worktree on a `brigade/<run id>` branch, which is how a team of writers avoids editing the same checkout. See [GLOSSARY.md](GLOSSARY.md) for the terms.
+agy's own subagents can only pick a model tier, so a native "neon subagent" runs on the session's model; when that isn't neon, the generic `forward` forwarder runs neon exactly.
+
+Runs are read-only unless asked to write, and use the agent's model at the harness's default effort unless the call picks a model or effort. A run with `--worktree` gets its own git worktree on a `brigade/<run id>` branch, which is how a team of writers avoids editing the same checkout. See [GLOSSARY.md](GLOSSARY.md) for the terms.
 
 ## Install
 
@@ -72,13 +74,17 @@ brigade run astra --write --effort high <<'EOF'
 Fix the flaky login test in tests/auth_test.rs; the race is in the session fixture.
 EOF
 brigade run neon --write --worktree "add a --json flag to the export command"
+brigade run sol --model gpt-6.1-sol --effort high "same question, previous Sol"
 brigade run sol --resume <session> --cwd <dir> "now add a regression test"
 
 id=$(brigade run hydrogen --detach "audit the error handling in src/" | awk '{print $4}')
-brigade wait "$id" --timeout 540
+brigade wait "$id" --timeout 100
+brigade cancel "$id"
 ```
 
 Each reply ends with `[brigade]` lines naming the run, and for a session the command that continues it.
+
+Every run belongs to whoever waits on it. `brigade wait` and a foreground `brigade run` renew the run's lease while they wait; a run nobody has waited on for 90 seconds is cancelled, along with everything its harness started. So stopping a forwarder subagent, or the session it was in, stops the agent it started. Ctrl-C on a foreground run and `brigade cancel <run id>` stop one at once.
 
 ## Your own agents
 
@@ -89,7 +95,7 @@ The user roster uses the same format as [roster.toml](roster.toml). An entry wit
 name = "claude-local"
 harness = "claude"
 model = "$LOCAL_MODEL"
-effort = "medium"
+effort = "medium"   # optional; without it the harness's default applies
 description = "Claude Code on the local model"
 args = ["--disallowedTools", "Artifact"]
 

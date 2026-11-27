@@ -8,67 +8,73 @@ description: Tag in a named agent from the brigade roster (opus, fable, sonnet, 
 A brigade agent is a named worker that runs in one harness's CLI on one model. You hand it a task and get back its reply. `brigade list` prints the whole roster, including agents the user added in `~/.config/brigade/roster.toml`.
 
 <!-- roster: generated from roster.toml -->
-| Agent | Runs in | Model | Default effort | What it is |
+| Agent | Runs in | Model | Effort | What it is |
 |---|---|---|---|---|
-| `opus` | Claude Code | `opus` | medium | Claude Opus in Claude Code |
-| `fable` | Claude Code | `fable` | medium | Claude Fable in Claude Code |
-| `sonnet` | Claude Code | `sonnet` | medium | Claude Sonnet in Claude Code |
-| `sol` | Codex | `gpt-6.2-sol` | medium | GPT-6.2 Sol in Codex, OpenAI's go-to model for coding and everyday work |
-| `astra` | Codex | `gpt-6.2-astra` | medium | GPT-6.2 Astra in Codex, OpenAI's most capable model for complex coding |
-| `neon` | Antigravity | `gemini-4-neon` | medium | Gemini 4 Neon in Antigravity |
-| `hydrogen` | Antigravity | `gemini-4-hydrogen` | medium | Gemini 4 Hydrogen in Antigravity |
+| `opus` | Claude Code | `opus` | harness default | Claude Opus in Claude Code |
+| `fable` | Claude Code | `fable` | harness default | Claude Fable in Claude Code |
+| `sonnet` | Claude Code | `sonnet` | harness default | Claude Sonnet in Claude Code |
+| `sol` | Codex | `gpt-6.2-sol` | harness default | GPT-6.2 Sol in Codex, OpenAI's go-to model for coding and everyday work |
+| `astra` | Codex | `gpt-6.2-astra` | harness default | GPT-6.2 Astra in Codex, OpenAI's most capable model for complex coding |
+| `neon` | Antigravity | `gemini-4-neon` | harness default | Gemini 4 Neon in Antigravity |
+| `hydrogen` | Antigravity | `gemini-4-hydrogen` | harness default | Gemini 4 Hydrogen in Antigravity |
 <!-- /roster -->
 
 ## Briefing an agent
 
 The agent knows only what you put in the task. Write it for a colleague who hasn't seen this conversation: the goal, the files and commands that matter, what you've already ruled out, and what you want back.
 
-Runs are read-only unless the task has to change files. Ask for a write run only then.
+Runs are read-only unless the task has to change files. Ask for a write run only then. Name a model or effort only when the user did: without one an agent runs on its roster model, at the harness's default effort.
 
 ## Starting one, by harness
 
+An agent from your own harness's family runs on your ordinary subagents; brigade only adds the agents that live in another CLI.
+
 ### In Claude Code
 
-Every roster agent has a subagent named `brigade:<name>`, e.g. `Agent(subagent_type: "brigade:sol", prompt: ...)`.
-
-- `brigade:opus`, `brigade:fable` and `brigade:sonnet` are native Claude subagents on that model. Set the call's `effort` to change their effort, and `isolation: "worktree"` to give one its own worktree
-- The others are forwarders that run the agent's own CLI through brigade. Put the routing in the prompt in plain words: "this is a write run", "use effort high", "use your own worktree", or "continue session `<id>` in `<dir>`"
-- An agent from the user's roster has no subagent of its own. Use `brigade:forward` and start the prompt with `agent: <name>`
+- opus, fable and sonnet: use the Agent tool as usual, with `model: "opus"` (or `fable`, `sonnet`) and `effort` if one was asked for
+- sol, astra, neon and hydrogen: `Agent(subagent_type: "brigade:<name>")`, a forwarder that runs the agent's own CLI. Put the routing in the prompt in plain words: "this is a write run", "use model `<id>`", "use effort high", "use your own worktree", or "continue session `<id>` in `<dir>`"
+- An agent from the user's roster, such as claude-local: `brigade:forward`, with `agent: <name>` as the first line of the prompt
 
 ### In Codex
 
-- `sol` and `astra` are native roles: `spawn_agent` with `agent_type: "sol"`, plus `reasoning_effort` to change the effort (the roster default is medium). They work in your checkout
-- Every other roster agent is a forwarder role of the same name, e.g. `agent_type: "neon"`, with routing in the message as above
-- For an agent from the user's roster, or a sol or astra that needs its own worktree, use `agent_type: "forward"` and start the message with `agent: <name>`
+- sol and astra: `spawn_agent` with `model: "gpt-6.2-sol"` (or `gpt-6.2-astra`) and `reasoning_effort` if one was asked for
+- opus, fable, sonnet, neon and hydrogen: `spawn_agent` with `agent_type: "<name>"`, a forwarder role, with routing in the message as above
+- An agent from the user's roster: `agent_type: "forward"`, with `agent: <name>` as the first line of the message
 - Collect replies with `wait_agent`
 
 ### In Antigravity
 
-agy can't pin a subagent to a model id, so every roster agent is a forwarder here, neon and hydrogen included: `invoke_subagent` with `TypeName: "neon"`, or `TypeName: "forward"` with `agent: <name>` at the top of the prompt.
+- neon and hydrogen: `invoke_subagent` with `TypeName: "self"`. agy subagents can only pick a tier, not a model id, so `Model: "inherit"` keeps the session's own model. When the session is on another model than the one asked for, use `forward` with `agent: neon` instead
+- opus, fable, sonnet, sol and astra: `invoke_subagent` with `TypeName: "<name>"`, a forwarder, with routing in the prompt as above
+- An agent from the user's roster: `TypeName: "forward"`, with `agent: <name>` at the top of the prompt
 
 ### From a shell
 
 Any harness can also run brigade directly:
 
 ```
-brigade run <agent> [--effort <level>] [--write] [--worktree] [--cwd <dir>] [--resume <session>] <<'BRIGADE_TASK'
+brigade run <agent> [--model <id>] [--effort <level>] [--write] [--worktree] [--cwd <dir>] [--resume <session>] <<'BRIGADE_TASK'
 <the task>
 BRIGADE_TASK
 ```
 
-That waits for the reply. `--detach` returns a run id at once instead; `brigade wait <run id> --timeout 540` collects it, and says so if the run is still going.
+That waits for the reply. `--detach` returns a run id at once instead; `brigade wait <run id> --timeout 100` collects it, and says so if the run is still going.
 
 ## Teams
 
 A team is several runs of one agent at once, one task each. Split the work into pieces that don't depend on each other, start every member in the same turn, then collect the replies and combine them yourself. Check with the user before starting more than five.
 
-Read-only members can share the checkout. Write members each need their own worktree: `isolation: "worktree"` for native Claude subagents, and "use your own worktree" for forwarders, which then run `brigade run --worktree`. A forwarder's reply names its worktree and branch. Review and merge those branches, then remove each worktree with `git worktree remove <path>`.
+Read-only members can share the checkout. Write members each need their own worktree: `isolation: "worktree"` on Claude Code's Agent tool, `Workspace: "branch"` on agy's `invoke_subagent`, and "use your own worktree" for a forwarder, which then runs `brigade run --worktree`. Codex subagents have no worktree option, so a Codex write team of sol or astra goes through `forward` with "use your own worktree". A forwarder's reply names its worktree and branch. Review and merge those branches, then remove each worktree with `git worktree remove <path>`.
 
 Runs nest at most two deep: a brigade agent can start one more level of agents, and those can't start any.
 
+## Stopping
+
+Stopping a forwarder stops its run: a run that nobody has waited on for 90 seconds is cancelled, along with everything its harness started. `brigade cancel <run id>` stops one at once.
+
 ## Following up
 
-A reply that came through brigade ends with `[brigade]` lines: the run, and for a session the `brigade run ... --resume <session> --cwd <dir>` command that continues it. Pass the session and directory back to a forwarder ("continue session `<id>` in `<dir>`") or run that command yourself. To follow up with a native subagent, use the harness's own tool (`SendMessage` in Claude Code, `followup_task` in Codex).
+A reply that came through brigade ends with `[brigade]` lines: the run, and for a session the `brigade run ... --resume <session> --cwd <dir>` command that continues it. Pass the session and directory back to a forwarder ("continue session `<id>` in `<dir>`") or run that command yourself. To follow up with one of your own subagents, use your harness's tool (`SendMessage` in Claude Code, `followup_task` in Codex).
 
 ## Reporting back
 

@@ -6,12 +6,15 @@ use brigade::settings::{MAX_DEPTH, Settings};
 use brigade::worktree;
 use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Read};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{ExitCode, Stdio};
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const STILL_RUNNING: u8 = 3;
+const INTERRUPTED_EXIT: u8 = 130;
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 /// Tag in named agents (sol, neon, opus...) that run in their own CLI.
 #[derive(Parser)]
@@ -39,6 +42,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Stop a run and everything its harness started
+    Cancel {
+        run: String,
+        #[arg(long)]
+        json: bool,
+    },
     #[command(name = "__exec", hide = true)]
     Exec { run: String },
 }
@@ -47,7 +56,10 @@ enum Command {
 struct RunArgs {
     /// A roster agent, e.g. sol or neon (see `brigade list`)
     agent: String,
-    /// Reasoning effort; defaults to the agent's roster effort
+    /// Model to use instead of the agent's own
+    #[arg(long)]
+    model: Option<String>,
+    /// Reasoning effort; defaults to the agent's roster effort, or else the harness's own default
     #[arg(long, value_enum)]
     effort: Option<Effort>,
     /// Let the agent change files; runs are read-only otherwise
@@ -62,7 +74,7 @@ struct RunArgs {
     /// Continue the session a previous run printed
     #[arg(long, value_name = "SESSION")]
     resume: Option<String>,
-    /// Start the run in the background, print its id and return
+    /// Start the run in the background, print its id and return. It's cancelled if nobody waits on it for 90s
     #[arg(long)]
     detach: bool,
     #[arg(long)]
@@ -100,7 +112,7 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         Command::Run(args) => run(&settings, args),
         Command::Wait { run, timeout, json } => {
             let (record, dir) = RunDir::open(&settings, &run)?;
-            let state = dir.wait(timeout.map(Duration::from_secs));
+            let state = dir.wait(timeout.map(Duration::from_secs), &|| false);
             Ok(print_state(
                 &record,
                 &dir,
@@ -109,10 +121,16 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
                 timeout.unwrap_or(WAIT_SLICE_SECS),
             ))
         }
+        Command::Cancel { run, json } => {
+            let (record, dir) = RunDir::open(&settings, &run)?;
+            let state = dir.cancel("cancelled with brigade cancel")?;
+            let _ = print_state(&record, &dir, &state, json, 0);
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Exec { run } => {
             let (record, dir) = RunDir::open(&settings, &run)?;
             if !matches!(dir.state(), State::Finished(_)) {
-                runs::execute(&record, &dir, &env_var);
+                runs::execute(&record, &dir, settings.lease, &env_var);
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -135,8 +153,8 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         )
     })?;
     let agent = entry.agent.clone();
-    let effort = args.effort.unwrap_or(agent.effort);
-    if !agent.harness.supports(effort) {
+    let effort = args.effort.or(agent.effort);
+    if effort.is_some_and(|e| !agent.harness.supports(e)) {
         let levels: Vec<&str> = agent.harness.efforts().iter().map(|e| e.as_str()).collect();
         return Err(format!(
             "{} runs in {}, which takes effort {}",
@@ -164,6 +182,7 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     let record = RunRecord {
         id,
         cwd: worktree.as_ref().map(|w| w.path.clone()).unwrap_or(cwd),
+        model: args.model.unwrap_or_else(|| agent.model.clone()),
         agent,
         effort,
         access: if args.write { Access::Write } else { Access::ReadOnly },
@@ -175,7 +194,7 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     dir.write_request(&record, &task)?;
 
     if args.detach {
-        spawn_worker(&record, &dir)?;
+        runs::spawn_worker(&record, &dir)?;
         if args.json {
             print!("{}", report::state_json(&record, &State::Running, dir.path()));
         } else {
@@ -183,30 +202,35 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         }
         return Ok(ExitCode::SUCCESS);
     }
-    dir.write_pid(std::process::id())?;
-    let outcome = runs::execute(&record, &dir, &env_var);
-    Ok(print_state(&record, &dir, &State::Finished(outcome), args.json, 0))
+
+    trap_interrupt();
+    let mut worker = runs::spawn_worker(&record, &dir)?;
+    // Reaped here so a worker that dies shows up as gone rather than as a zombie.
+    std::thread::spawn(move || worker.wait());
+    let state = match dir.wait(None, &|| INTERRUPTED.load(Ordering::SeqCst)) {
+        State::Running => dir.cancel("interrupted")?,
+        state => state,
+    };
+    let code = print_state(&record, &dir, &state, args.json, 0);
+    Ok(if INTERRUPTED.load(Ordering::SeqCst) {
+        ExitCode::from(INTERRUPTED_EXIT)
+    } else {
+        code
+    })
 }
 
-fn spawn_worker(record: &RunRecord, dir: &RunDir) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("can't find the brigade binary: {e}"))?;
-    let log = std::fs::File::create(dir.file("worker.log")).map_err(|e| format!("can't create the worker log: {e}"))?;
-    let mut command = std::process::Command::new(exe);
-    command
-        .args(["__exec", &record.id])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(log);
-    // SAFETY: setsid is async-signal-safe. A new session keeps the worker alive
-    // when the shell that started it exits, as a harness's shell call does.
+extern "C" fn on_interrupt(_: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+/// Ctrl-C on a foreground run cancels it. The worker sits in a session of its
+/// own, out of reach of the terminal's signal, so brigade passes it on.
+fn trap_interrupt() {
+    let handler: extern "C" fn(libc::c_int) = on_interrupt;
+    // SAFETY: the handler only stores to an atomic.
     unsafe {
-        command.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
+        libc::signal(libc::SIGINT, handler as libc::sighandler_t);
     }
-    let child = command.spawn().map_err(|e| format!("can't start the worker: {e}"))?;
-    dir.write_pid(child.id())
 }
 
 fn print_state(record: &RunRecord, dir: &RunDir, state: &State, json: bool, waited: u64) -> ExitCode {
@@ -223,6 +247,12 @@ fn print_state(record: &RunRecord, dir: &RunDir, state: &State, json: bool, wait
         State::Finished(Outcome::Failed { error }) => {
             if !json {
                 eprint!("{}", report::failed(record, error, dir.path()));
+            }
+            ExitCode::FAILURE
+        }
+        State::Finished(Outcome::Cancelled { reason }) => {
+            if !json {
+                eprint!("{}", report::cancelled(record, reason, dir.path()));
             }
             ExitCode::FAILURE
         }

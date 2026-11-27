@@ -6,8 +6,9 @@ A Rust CLI (`src/`) plus a plugin for Claude Code, Codex and agy (`plugin/`). Th
 
 - `roster.toml`: the built-in roster, embedded into the binary
 - `src/invocation.rs`: per-harness command lines and output parsing; the rules every harness quirk lives in
-- `src/runs.rs`: run directories, executing a run, detached runs and waiting
-- `src/render.rs`: renders everything under `plugin/` (and `.claude-plugin/marketplace.json`) from the roster
+- `src/runs.rs`: run directories, the worker, the lease, waiting and cancelling
+- `src/kill.rs`: stopping a harness's whole process tree, including commands it started in sessions of their own
+- `src/render.rs`: renders everything under `plugin/` (and `.claude-plugin/marketplace.json`) from the roster. A host only gets forwarders for agents from other harnesses; its own family stays on its ordinary subagents
 - `plugin/skills/brigade/SKILL.md`: hand-written, except the roster table between the markers
 
 ## Workflow

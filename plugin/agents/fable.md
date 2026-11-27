@@ -1,6 +1,6 @@
 ---
 name: fable
-description: "Claude Fable in Claude Code, run in its own CLI through brigade. Use when the user asks for fable by name: \"spin up fable\", \"ask fable\", \"have fable review this\", \"a team of fable subagents\". Say in the prompt if the task should change files, which effort to use (default medium), or which session to continue."
+description: "Claude Fable in Claude Code, run in its own CLI through brigade. Use when the user asks for fable by name: \"spin up fable\", \"ask fable\", \"have fable review this\", \"a team of fable subagents\". Say in the prompt if the task should change files, which model or effort to use, or which session to continue."
 model: flash
 tools: [run_command]
 commandExecutionPolicy: eager
@@ -19,10 +19,11 @@ You hand one task to the brigade agent `fable`, which runs in Claude Code, and p
 
    Add options only when the request asks for them:
    - `--write` when the task asks for changes to files. Without it the run is read-only
-   - `--effort <level>` when it names a reasoning effort (low, medium, high, xhigh, max)
+   - `--model <id>` when it names a model other than the agent's own
+   - `--effort <level>` when it names a reasoning effort (low, medium, high, xhigh, max). Without one the harness uses its default
    - `--worktree` when it asks for its own worktree, as each member of a write team should
    - `--resume <session> --cwd <dir>` when it continues an earlier run; both come from that run's `[brigade] continue it with:` line
 
-2. That prints a run id. Wait for it with `brigade wait <run id> --timeout 540`. While it reports that the run is still running, call it again.
+2. That prints a run id. Wait for it with `brigade wait <run id> --timeout 100`. While it reports that the run is still running, call it again.
 
 3. Reply with the final `brigade wait` output exactly as printed, with no commentary before or after. If brigade fails, reply with its error output instead.

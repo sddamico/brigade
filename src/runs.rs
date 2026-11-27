@@ -1,23 +1,39 @@
-//! A run is one task handed to one agent. Each gets a directory under the state
-//! dir holding its request, the harness's logs and its outcome, which is what
-//! lets `brigade wait` pick up a detached run from another process.
+//! A run is one task handed to one agent. Every run executes in a worker
+//! process in a session of its own, which starts the harness CLI in a process
+//! group so cancelling stops everything the harness started. The run's
+//! directory holds its request, the logs, the outcome and the lease.
+//!
+//! The lease is how a run notices nobody wants it any more: whoever waits on a
+//! run (a forwarder's `brigade wait`, or a foreground `brigade run`) renews it,
+//! and a worker whose lease lapses cancels its run. Stopping a forwarder
+//! subagent, or the session it belongs to, stops the waiting and so the work.
 
 use crate::harness::{Access, Effort};
 use crate::invocation::{self, Request};
+use crate::kill::Tree;
 use crate::roster::Agent;
 use crate::settings::{DEPTH_VAR, Settings};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{ErrorKind, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const POLL: Duration = Duration::from_millis(500);
+/// How long a harness gets to exit after SIGTERM before it is killed.
+const TERM_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunRecord {
     pub id: String,
     pub agent: Agent,
-    pub effort: Effort,
+    /// The model the run uses: the agent's, unless the call chose another.
+    pub model: String,
+    /// None leaves the effort to the harness's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
     pub access: Access,
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,6 +56,7 @@ pub struct Worktree {
 pub enum Outcome {
     Done { session: Option<String>, message: String },
     Failed { error: String },
+    Cancelled { reason: String },
 }
 
 #[derive(Debug, PartialEq)]
@@ -88,6 +105,7 @@ impl RunDir {
     }
 
     pub fn write_request(&self, record: &RunRecord, task: &str) -> Result<(), String> {
+        self.renew_lease()?;
         write_atomic(&self.file("task.txt"), task.as_bytes())?;
         write_atomic(
             &self.file("run.json"),
@@ -95,12 +113,16 @@ impl RunDir {
         )
     }
 
-    pub fn task(&self) -> Result<String, String> {
+    fn task(&self) -> Result<String, String> {
         fs::read_to_string(self.file("task.txt")).map_err(|e| format!("can't read the run's task: {e}"))
     }
 
-    pub fn write_pid(&self, pid: u32) -> Result<(), String> {
-        write_atomic(&self.file("pid"), pid.to_string().as_bytes())
+    fn write_pid(&self, name: &str, pid: u32) -> Result<(), String> {
+        write_atomic(&self.file(name), pid.to_string().as_bytes())
+    }
+
+    fn pid(&self, name: &str) -> Option<i32> {
+        fs::read_to_string(self.file(name)).ok()?.trim().parse().ok()
     }
 
     fn write_outcome(&self, outcome: &Outcome) -> Result<(), String> {
@@ -115,14 +137,27 @@ impl RunDir {
         serde_json::from_str(&text).ok()
     }
 
+    pub fn renew_lease(&self) -> Result<(), String> {
+        write_atomic(&self.file("lease"), now().to_string().as_bytes())
+    }
+
+    fn lease_age(&self) -> Duration {
+        fs::metadata(self.file("lease"))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .unwrap_or(Duration::MAX)
+    }
+
+    fn cancel_reason(&self) -> Option<String> {
+        fs::read_to_string(self.file("cancel")).ok()
+    }
+
     pub fn state(&self) -> State {
         if let Some(outcome) = self.outcome() {
             return State::Finished(outcome);
         }
-        let pid = fs::read_to_string(self.file("pid"))
-            .ok()
-            .and_then(|p| p.trim().parse::<i32>().ok());
-        match pid {
+        match self.pid("pid") {
             Some(pid) if !is_alive(pid) => match self.outcome() {
                 Some(outcome) => State::Finished(outcome),
                 None => State::Lost,
@@ -132,34 +167,97 @@ impl RunDir {
         }
     }
 
-    pub fn wait(&self, timeout: Option<Duration>) -> State {
+    /// Waits for the run to finish, renewing its lease meanwhile. Returns
+    /// `Running` once `timeout` passes, or as soon as `interrupted` says so.
+    pub fn wait(&self, timeout: Option<Duration>, interrupted: &dyn Fn() -> bool) -> State {
         let deadline = timeout.map(|t| Instant::now() + t);
         loop {
+            let _ = self.renew_lease();
             let state = self.state();
-            if state != State::Running || deadline.is_some_and(|d| Instant::now() >= d) {
+            if state != State::Running || interrupted() || deadline.is_some_and(|d| Instant::now() >= d) {
                 return state;
             }
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(POLL);
         }
+    }
+
+    /// Asks the worker to stop the run, and waits for it to say it has. A run
+    /// whose worker is already gone has its harness stopped here instead.
+    pub fn cancel(&self, reason: &str) -> Result<State, String> {
+        if let State::Finished(outcome) = self.state() {
+            return Ok(State::Finished(outcome));
+        }
+        write_atomic(&self.file("cancel"), reason.as_bytes())?;
+        let deadline = Instant::now() + TERM_GRACE * 3;
+        while Instant::now() < deadline {
+            match self.state() {
+                State::Running => std::thread::sleep(POLL),
+                State::Lost => break,
+                finished => return Ok(finished),
+            }
+        }
+        if let Some(harness) = self.pid("harness.pid") {
+            Tree::of(harness).signal(libc::SIGKILL);
+        }
+        let outcome = Outcome::Cancelled {
+            reason: reason.to_string(),
+        };
+        self.write_outcome(&outcome)?;
+        Ok(State::Finished(outcome))
     }
 }
 
-/// Runs the harness CLI for `record` to completion and records the outcome.
-pub fn execute(record: &RunRecord, dir: &RunDir, var: &dyn Fn(&str) -> Option<String>) -> Outcome {
+/// Starts the worker for a run in a session of its own, so it outlives the
+/// shell call that started it.
+pub fn spawn_worker(record: &RunRecord, dir: &RunDir) -> Result<Child, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("can't find the brigade binary: {e}"))?;
+    let log = fs::File::create(dir.file("worker.log")).map_err(|e| format!("can't create the worker log: {e}"))?;
+    let mut command = Command::new(exe);
+    command
+        .args(["__exec", &record.id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log);
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let child = command.spawn().map_err(|e| format!("can't start the worker: {e}"))?;
+    dir.write_pid("pid", child.id())?;
+    Ok(child)
+}
+
+/// The worker's job: runs the harness CLI for `record` until it exits, the run
+/// is cancelled or its lease lapses, and records the outcome.
+pub fn execute(record: &RunRecord, dir: &RunDir, lease: Duration, var: &dyn Fn(&str) -> Option<String>) -> Outcome {
     let outcome = match dir.task() {
-        Ok(task) => run_harness(record, dir, &task, var),
+        Ok(task) => run_harness(record, dir, &task, lease, var),
         Err(error) => Outcome::Failed { error },
     };
-    if let Err(error) = dir.write_outcome(&outcome) {
+    // A `brigade cancel` that gave up on the worker may have recorded the
+    // outcome already.
+    if dir.outcome().is_none()
+        && let Err(error) = dir.write_outcome(&outcome)
+    {
         return Outcome::Failed { error };
     }
     outcome
 }
 
-fn run_harness(record: &RunRecord, dir: &RunDir, task: &str, var: &dyn Fn(&str) -> Option<String>) -> Outcome {
+fn run_harness(
+    record: &RunRecord,
+    dir: &RunDir,
+    task: &str,
+    lease: Duration,
+    var: &dyn Fn(&str) -> Option<String>,
+) -> Outcome {
     let last_message_file = dir.file("last-message.txt");
     let request = Request {
         agent: &record.agent,
+        model: &record.model,
         effort: record.effort,
         access: record.access,
         cwd: &record.cwd,
@@ -197,7 +295,17 @@ fn run_harness(record: &RunRecord, dir: &RunDir, task: &str, var: &dyn Fn(&str) 
             Stdio::piped()
         })
         .stdout(stdout)
-        .stderr(stderr);
+        .stderr(stderr)
+        .process_group(0);
+    #[cfg(target_os = "linux")]
+    // SAFETY: prctl is async-signal-safe. The harness dies with the worker
+    // rather than running on unwatched if the worker is killed.
+    unsafe {
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) if e.kind() == ErrorKind::NotFound => {
@@ -211,17 +319,33 @@ fn run_harness(record: &RunRecord, dir: &RunDir, task: &str, var: &dyn Fn(&str) 
             };
         }
     };
+    let _ = dir.write_pid("harness.pid", child.id());
     if let Some(mut stdin) = child.stdin.take() {
+        let prompt = invocation.stdin.clone();
         // A harness that exits early closes the pipe; its exit status tells the story.
-        let _ = stdin.write_all(invocation.stdin.as_bytes());
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(prompt.as_bytes());
+        });
     }
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(e) => {
-            return Outcome::Failed {
-                error: format!("lost track of `{}`: {e}", invocation.program),
-            };
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                return Outcome::Failed {
+                    error: format!("lost track of `{}`: {e}", invocation.program),
+                };
+            }
         }
+        let reason = dir
+            .cancel_reason()
+            .or_else(|| (dir.lease_age() > lease).then(|| format!("nobody waited on it for {}s", lease.as_secs())));
+        if let Some(reason) = reason {
+            stop(&mut child);
+            return Outcome::Cancelled { reason };
+        }
+        std::thread::sleep(POLL);
     };
 
     let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
@@ -245,6 +369,24 @@ fn run_harness(record: &RunRecord, dir: &RunDir, task: &str, var: &dyn Fn(&str) 
             }
         }
     }
+}
+
+/// SIGTERM to everything the harness started, then SIGKILL to whatever is left.
+fn stop(child: &mut Child) {
+    let pid = child.id() as i32;
+    let mut tree = Tree::of(pid);
+    tree.signal(libc::SIGTERM);
+    let deadline = Instant::now() + TERM_GRACE;
+    while Instant::now() < deadline {
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Whatever the harness started while it was shutting down.
+    tree.merge(Tree::of(pid));
+    tree.signal(libc::SIGKILL);
+    let _ = child.wait();
 }
 
 pub fn now() -> u64 {
