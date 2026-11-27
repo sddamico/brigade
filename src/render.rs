@@ -26,7 +26,8 @@ const KEYWORDS: [&str; 5] = ["subagents", "multi-agent", "codex", "antigravity",
 const CLAUDE_FORWARDER_MODEL: &str = "haiku";
 const CODEX_FORWARDER_MODEL: &str = "gpt-6-luna";
 const CODEX_FORWARDER_EFFORT: &str = "low";
-const AGY_FORWARDER_TIER: &str = "flash_lite";
+// flash_lite answered trivial tasks itself instead of running brigade.
+const AGY_FORWARDER_TIER: &str = "flash";
 
 /// Whether `host` runs `agent` itself, as a subagent pinned to the agent's
 /// model. agy can't: its agent files take a model tier, never a model id.
@@ -221,7 +222,8 @@ fn forwarder_body(agent: Option<&Agent>, shell_tool: &str) -> String {
     };
     format!(
         "{intro} You don't do any of the work yourself: don't read files, explore the repo or answer from \
-your own knowledge.
+your own knowledge. That holds even when the task looks trivial or you already know the answer: the user \
+asked for {name} to do it, so a reply that didn't come from brigade is a wrong reply.
 
 1. Start the run with one {shell_tool} call, giving the task on stdin as you received it, minus the routing \
 instructions the options below cover:
