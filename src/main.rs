@@ -112,7 +112,7 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         Command::Run(args) => run(&settings, args),
         Command::Wait { run, timeout, json } => {
             let (record, dir) = RunDir::open(&settings, &run)?;
-            let state = dir.wait(timeout.map(Duration::from_secs), &|| false);
+            let state = dir.wait(timeout.map(Duration::from_secs), &orphan_check());
             Ok(print_state(
                 &record,
                 &dir,
@@ -207,8 +207,9 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     let mut worker = runs::spawn_worker(&record, &dir)?;
     // Reaped here so a worker that dies shows up as gone rather than as a zombie.
     std::thread::spawn(move || worker.wait());
-    let state = match dir.wait(None, &|| INTERRUPTED.load(Ordering::SeqCst)) {
-        State::Running => dir.cancel("interrupted")?,
+    let orphaned = orphan_check();
+    let state = match dir.wait(None, &|| INTERRUPTED.load(Ordering::SeqCst) || orphaned()) {
+        State::Running if INTERRUPTED.load(Ordering::SeqCst) => dir.cancel("interrupted")?,
         state => state,
     };
     let code = print_state(&record, &dir, &state, args.json, 0);
@@ -217,6 +218,16 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     } else {
         code
     })
+}
+
+/// True once whoever started this process has died. A waiter whose forwarder
+/// was killed outright lives on as an orphan, and must stop renewing the lease
+/// so the run is cancelled. It doesn't cancel by itself: a harness's shell
+/// timeout kills the waiter's parent too, and the forwarder then waits again.
+fn orphan_check() -> impl Fn() -> bool {
+    // SAFETY: getppid can't fail.
+    let parent = unsafe { libc::getppid() };
+    move || unsafe { libc::getppid() } != parent
 }
 
 extern "C" fn on_interrupt(_: libc::c_int) {

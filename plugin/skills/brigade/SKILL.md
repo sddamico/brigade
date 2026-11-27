@@ -41,6 +41,7 @@ An agent from your own harness's family runs on your ordinary subagents; brigade
 - opus, fable, sonnet, neon and hydrogen: `spawn_agent` with `agent_type: "<name>"`, a forwarder role, with routing in the message as above
 - An agent from the user's roster: `agent_type: "forward"`, with `agent: <name>` as the first line of the message
 - Collect replies with `wait_agent`
+- Codex runs only a few subagents at once (`[agents] max_threads` in config.toml, 4 by default, counting the session itself). Team members beyond the free slots can run from the shell with `brigade run --detach` and `brigade wait`
 
 ### In Antigravity
 

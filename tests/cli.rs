@@ -475,3 +475,39 @@ fn the_call_can_choose_the_model_and_otherwise_leaves_effort_to_the_harness() {
         "{args:?}"
     );
 }
+
+#[test]
+fn a_waiter_whose_caller_was_killed_stops_holding_the_run() {
+    let sandbox = Sandbox::new();
+    let started = sandbox
+        .command(&["run", "neon", "--detach", "job"])
+        .env("FAKE_SLEEP", "30")
+        .env("BRIGADE_LEASE_SECS", "2")
+        .output()
+        .unwrap();
+    let id = run_id(&stdout(&started));
+    let harness = sandbox.harness_pid("agy");
+
+    // A stand-in for a forwarder's shell: it waits on the run, then is killed
+    // outright, leaving its `brigade wait` orphaned.
+    let waiter_pid = sandbox.root().join("waiter.pid");
+    let mut caller = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#""$BRIGADE" wait "$RUN" > /dev/null 2>&1 & echo $! > "$WAITER_PID"; wait"#)
+        .env("BRIGADE", env!("CARGO_BIN_EXE_brigade"))
+        .env("RUN", &id)
+        .env("WAITER_PID", &waiter_pid)
+        .env("HOME", sandbox.root())
+        .env("XDG_STATE_HOME", sandbox.root().join("state"))
+        .env("XDG_CONFIG_HOME", sandbox.root().join("config"))
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    caller.kill().unwrap();
+    let _ = caller.wait();
+    let waiter: i32 = fs::read_to_string(&waiter_pid).unwrap().trim().parse().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert!(!is_alive(waiter), "the orphaned waiter kept going");
+    assert!(!is_alive(harness), "the run outlived its killed caller");
+}
