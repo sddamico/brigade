@@ -26,7 +26,7 @@ case "$name" in
     printf 'codex reply\n' > "$out"
     echo '{"type":"thread.started","thread_id":"codex-thread"}'
     echo '{"type":"turn.completed","usage":{}}' ;;
-  agy) echo '{"conversation_id":"agy-conversation","status":"SUCCESS","response":"agy reply\n"}' ;;
+  agy) printf '%s\n' '{"conversation_id":"agy-conversation","status":"SUCCESS","response":"agy reply\n"}' ;;
 esac
 "#;
 
