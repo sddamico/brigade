@@ -1,0 +1,20 @@
+[package]
+name = "brigade"
+version = "0.1.0"
+edition = "2024"
+description = "Tag in named agents (sol, neon, opus...) that run in their own CLI from Claude Code, Codex or Antigravity"
+license = "MIT"
+repository = "https://github.com/sddamico/brigade"
+readme = "README.md"
+# The plugin, skill and docs ship through the marketplace, not the crate.
+exclude = ["plugin/", ".beads/", ".claude-plugin/"]
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+
+[dev-dependencies]
+tempfile = "3"

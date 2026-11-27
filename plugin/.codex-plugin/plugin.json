@@ -1,0 +1,36 @@
+{
+  "author": {
+    "name": "Stephen D'Amico",
+    "url": "https://github.com/sddamico"
+  },
+  "description": "Tag in named agents (sol, neon, opus...) that each run in their own CLI (Claude Code, Codex or Antigravity), singly or as a team, from any of the three",
+  "homepage": "https://github.com/sddamico/brigade",
+  "interface": {
+    "capabilities": [
+      "Skills",
+      "Subagents"
+    ],
+    "category": "Developer Tools",
+    "defaultPrompt": [
+      "Use $brigade to spin up a sol subagent to review this change.",
+      "Use $brigade to send a team of three neon subagents to research this."
+    ],
+    "developerName": "Stephen D'Amico",
+    "displayName": "Brigade",
+    "longDescription": "Tag in named agents (sol, neon, opus...) that each run in their own CLI (Claude Code, Codex or Antigravity), singly or as a team, from any of the three",
+    "shortDescription": "Tag in agents that run in their own CLI",
+    "websiteURL": "https://github.com/sddamico/brigade"
+  },
+  "keywords": [
+    "subagents",
+    "multi-agent",
+    "codex",
+    "antigravity",
+    "claude-code"
+  ],
+  "license": "MIT",
+  "name": "brigade",
+  "repository": "https://github.com/sddamico/brigade",
+  "skills": "./skills/",
+  "version": "0.1.0"
+}

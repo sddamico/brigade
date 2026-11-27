@@ -1,0 +1,56 @@
+# The built-in roster. A user roster at ~/.config/brigade/roster.toml (or
+# $XDG_CONFIG_HOME/brigade/roster.toml) adds agents, or replaces these by name.
+#
+# harness:  the CLI the agent runs in: claude, codex or agy
+# model:    passed to that CLI's --model (agy takes the family; effort picks the tier)
+# effort:   the default when a call doesn't choose one
+# env/args: extra environment and CLI arguments; values expand $VAR and ${VAR}
+
+[[agent]]
+name = "opus"
+harness = "claude"
+model = "opus"
+effort = "medium"
+description = "Claude Opus in Claude Code"
+
+[[agent]]
+name = "fable"
+harness = "claude"
+model = "fable"
+effort = "medium"
+description = "Claude Fable in Claude Code"
+
+[[agent]]
+name = "sonnet"
+harness = "claude"
+model = "sonnet"
+effort = "medium"
+description = "Claude Sonnet in Claude Code"
+
+[[agent]]
+name = "sol"
+harness = "codex"
+model = "gpt-6.2-sol"
+effort = "medium"
+description = "GPT-6.2 Sol in Codex, OpenAI's go-to model for coding and everyday work"
+
+[[agent]]
+name = "astra"
+harness = "codex"
+model = "gpt-6.2-astra"
+effort = "medium"
+description = "GPT-6.2 Astra in Codex, OpenAI's most capable model for complex coding"
+
+[[agent]]
+name = "neon"
+harness = "agy"
+model = "gemini-4-neon"
+effort = "medium"
+description = "Gemini 4 Neon in Antigravity"
+
+[[agent]]
+name = "hydrogen"
+harness = "agy"
+model = "gemini-4-hydrogen"
+effort = "medium"
+description = "Gemini 4 Hydrogen in Antigravity"

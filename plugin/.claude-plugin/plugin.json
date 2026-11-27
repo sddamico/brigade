@@ -1,0 +1,30 @@
+{
+  "agents": [
+    "./claude/agents/opus.md",
+    "./claude/agents/fable.md",
+    "./claude/agents/sonnet.md",
+    "./claude/agents/sol.md",
+    "./claude/agents/astra.md",
+    "./claude/agents/neon.md",
+    "./claude/agents/hydrogen.md",
+    "./claude/agents/forward.md"
+  ],
+  "author": {
+    "name": "Stephen D'Amico",
+    "url": "https://github.com/sddamico"
+  },
+  "description": "Tag in named agents (sol, neon, opus...) that each run in their own CLI (Claude Code, Codex or Antigravity), singly or as a team, from any of the three",
+  "homepage": "https://github.com/sddamico/brigade",
+  "keywords": [
+    "subagents",
+    "multi-agent",
+    "codex",
+    "antigravity",
+    "claude-code"
+  ],
+  "license": "MIT",
+  "name": "brigade",
+  "repository": "https://github.com/sddamico/brigade",
+  "skills": "./skills/",
+  "version": "0.1.0"
+}

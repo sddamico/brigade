@@ -1,0 +1,20 @@
+{
+  "author": {
+    "name": "Stephen D'Amico",
+    "url": "https://github.com/sddamico"
+  },
+  "description": "Tag in named agents (sol, neon, opus...) that each run in their own CLI (Claude Code, Codex or Antigravity), singly or as a team, from any of the three",
+  "displayName": "Brigade",
+  "homepage": "https://github.com/sddamico/brigade",
+  "keywords": [
+    "subagents",
+    "multi-agent",
+    "codex",
+    "antigravity",
+    "claude-code"
+  ],
+  "license": "MIT",
+  "name": "brigade",
+  "repository": "https://github.com/sddamico/brigade",
+  "version": "0.1.0"
+}
