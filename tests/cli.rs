@@ -31,13 +31,16 @@ esac
 "#;
 
 struct Sandbox {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    // Canonical, since macOS temp dirs sit behind the /var -> /private/var link.
+    root: PathBuf,
 }
 
 impl Sandbox {
     fn new() -> Sandbox {
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
+        let root = dir.path().canonicalize().unwrap();
+        let bin = root.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let fake = bin.join("fake-cli");
         fs::write(&fake, FAKE_CLI).unwrap();
@@ -45,12 +48,12 @@ impl Sandbox {
         for name in ["claude", "codex", "agy"] {
             std::os::unix::fs::symlink(&fake, bin.join(name)).unwrap();
         }
-        fs::create_dir_all(dir.path().join("work")).unwrap();
-        Sandbox { dir }
+        fs::create_dir_all(root.join("work")).unwrap();
+        Sandbox { _dir: dir, root }
     }
 
     fn root(&self) -> &Path {
-        self.dir.path()
+        &self.root
     }
 
     fn work(&self) -> PathBuf {
