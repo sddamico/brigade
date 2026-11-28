@@ -4,10 +4,11 @@
 use crate::accounts::{Limit, local_time};
 use crate::capacity::AccountCapacity;
 use crate::harness::{Access, Effort};
-use crate::roster::{BenchmarkSource, Entry, Source};
+use crate::roster::{Benchmark, BenchmarkSource, Entry, Roster, ServedModel, Source};
 use crate::runs::{Outcome, Run, RunRecord, State};
 use crate::worktree::{WorktreeReport, WorktreeState};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// A detached run's wait slice. It stays under the 2 minute default timeout of
@@ -112,19 +113,34 @@ pub fn limited(record: &RunRecord, outcome: &Outcome, logs: &Path, worktree: Opt
 
 /// Says which agent a run started on when a usage limit made it switch, and
 /// when that agent's limit resets.
+/// Every route or agent the run left behind, each with where it went next and
+/// why, and how long it waited for capacity.
 fn fell_back(record: &RunRecord) -> String {
-    let to = format!(
-        "{} ran on the {} account instead",
-        record.agent.name, record.agent.account.name
-    );
-    match &record.fell_back_from {
-        Some(from) if from.limited => format!(
-            "[brigade] {} hit a usage limit on the {} account, so {to}: {}\n",
-            from.agent, from.account, from.error
-        ),
-        Some(from) => format!("[brigade] {}, so {to}\n", from.error),
-        None => String::new(),
+    let hops = &record.fell_back_from;
+    let mut out = String::new();
+    for (i, from) in hops.iter().enumerate() {
+        let (agent, account) = match hops.get(i + 1) {
+            Some(next) => (&next.agent, &next.account),
+            None => (&record.agent.name, &record.agent.account.name),
+        };
+        let to = format!("{agent} ran on the {account} account instead");
+        out.push_str(&if from.limited {
+            format!(
+                "[brigade] {} hit a usage limit on the {} account, so {to}: {}\n",
+                from.agent, from.account, from.error
+            )
+        } else {
+            format!("[brigade] {}, so {to}\n", from.error)
+        });
     }
+    if let Some(waited) = &record.waited {
+        let took = match waited.secs {
+            0..120 => format!("{}s", waited.secs),
+            secs => format!("{} min", secs / 60),
+        };
+        out.push_str(&format!("[brigade] it waited {took} {} before it ran\n", waited.why));
+    }
+    out
 }
 
 pub fn cancelled(record: &RunRecord, reason: &str, logs: &Path, worktree: Option<&WorktreeReport>) -> String {
@@ -278,44 +294,64 @@ pub fn state_json(record: &RunRecord, state: &State, logs: &Path, worktree: Opti
 
 /// One line per agent, then one per route: the account, harness and model it
 /// runs on there.
-pub fn roster(agents: &[&Entry], routes: &[Entry], source: Option<&BenchmarkSource>, user_file: &Path) -> String {
+/// One line per agent (what it's best for, its score, its fallback), then one
+/// per route. An agent on an account that reports which model it serves takes
+/// that model's description, since it runs whatever is loaded. `serving` is the
+/// model each such account last reported.
+pub fn roster(roster: &Roster, serving: &BTreeMap<String, Vec<String>>, user_file: &Path) -> String {
+    let agents: Vec<(&Entry, Option<&ServedModel>)> = roster
+        .agents()
+        .into_iter()
+        .map(|entry| (entry, served_model(roster, serving, &entry.agent.name)))
+        .collect();
+    let mut sources: Vec<&BenchmarkSource> = Vec::new();
+    for (entry, served) in &agents {
+        if let Some(benchmark) = benchmark_of(entry, *served)
+            && !sources.iter().any(|s| s.key == benchmark.source.key)
+        {
+            sources.push(&benchmark.source);
+        }
+    }
     let mut out = String::new();
-    if let Some(source) = source {
+    for source in &sources {
         out.push_str(&format!(
-            "Scores are from the {} ({}), read {}.\n\n",
-            source.name, source.url, source.read
+            "Scores ({}) are from the {} ({}), read {}.\n",
+            source.key, source.name, source.url, source.read
         ));
     }
-    for entry in agents {
+    if !sources.is_empty() {
+        out.push('\n');
+    }
+    for (entry, served) in agents {
         let agent = &entry.agent;
-        let best_for = agent
-            .best_for
-            .as_deref()
+        let best_for = served
+            .and_then(|m| m.best_for.as_deref())
+            .or(agent.best_for.as_deref())
             .map(|b| format!(" Best for {b}."))
             .unwrap_or_default();
+        let score = benchmark_of(entry, served).map(score).unwrap_or_default();
         let fallback = match &entry.fallback {
             Some(fallback) => format!(" Falls back to {fallback} on a usage limit."),
             None => String::new(),
         };
-        let score = agent
-            .benchmark
-            .as_ref()
-            .map(|b| {
-                format!(
-                    " Scores {} at effort {}, ${:.2} and {:.0} min a task.",
-                    b.intelligence, b.effort, b.cost_per_task, b.minutes_per_task
-                )
-            })
-            .unwrap_or_default();
-        out.push_str(&format!("{}:{best_for}{score}{fallback}\n", agent.name));
-        for route in routes.iter().filter(|r| r.agent.name == agent.name) {
+        let said = format!("{best_for}{score}{fallback}");
+        if said.is_empty() {
+            out.push_str(&format!("{}\n", agent.name));
+        } else {
+            out.push_str(&format!("{}:{said}\n", agent.name));
+        }
+        for route in roster.routes(&agent.name) {
             let source = match route.source {
                 Source::BuiltIn => String::new(),
                 Source::User => format!(", from {}", user_file.display()),
             };
             let agent = &route.agent;
+            let serves = serving
+                .get(&agent.account.name)
+                .map(|ids| format!(", serving {}", ids.join(", ")))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "  {} account: {} ({}, {}{source})\n",
+                "  {} account: {} ({}, {}{source}{serves})\n",
                 agent.account.name,
                 agent.description,
                 agent.model,
@@ -324,6 +360,41 @@ pub fn roster(agents: &[&Entry], routes: &[Entry], source: Option<&BenchmarkSour
         }
     }
     out
+}
+
+/// The roster's entry for the model an agent's server reports, if it has one.
+pub fn served_model<'a>(
+    roster: &'a Roster,
+    serving: &BTreeMap<String, Vec<String>>,
+    agent: &str,
+) -> Option<&'a ServedModel> {
+    roster
+        .routes(agent)
+        .iter()
+        .filter_map(|route| serving.get(&route.agent.account.name))
+        .flatten()
+        .find_map(|id| roster.served_model(id))
+}
+
+fn benchmark_of<'a>(entry: &'a Entry, served: Option<&'a ServedModel>) -> Option<&'a Benchmark> {
+    match served {
+        Some(model) => model.benchmark.as_ref(),
+        None => entry.agent.benchmark.as_ref(),
+    }
+}
+
+fn score(benchmark: &Benchmark) -> String {
+    let effort = benchmark.effort.map(|e| format!(" at effort {e}")).unwrap_or_default();
+    let per_task = match (benchmark.cost_per_task, benchmark.minutes_per_task) {
+        (Some(cost), Some(minutes)) => format!(", ${cost:.2} and {minutes:.0} min a task"),
+        (Some(cost), None) => format!(", ${cost:.2} a task"),
+        (None, Some(minutes)) => format!(", {minutes:.0} min a task"),
+        (None, None) => String::new(),
+    };
+    format!(
+        " Scores {} ({}){effort}{per_task}.",
+        benchmark.intelligence, benchmark.source.key
+    )
 }
 
 pub fn capacity(accounts: &[AccountCapacity], now: u64) -> String {
@@ -335,12 +406,17 @@ pub fn capacity(accounts: &[AccountCapacity], now: u64) -> String {
         };
         let state = match &account.limit {
             Some(limit) => limited_until(limit),
+            None if !account.agents.is_empty() && account.agents.iter().all(|a| a.limit.is_some()) => {
+                "every model limited".to_string()
+            }
             None if !account.free => "full".to_string(),
-            None if account.agents.iter().all(|a| a.limit.is_some()) => "every model limited".to_string(),
             None => "free".to_string(),
         };
         let names: Vec<&str> = account.agents.iter().map(|a| a.name.as_str()).collect();
         out.push_str(&format!("{} ({}): {state}, {slots}", account.account, names.join(", ")));
+        if !account.serving.is_empty() {
+            out.push_str(&format!(", serving {}", account.serving.join(", ")));
+        }
         if account.waiting > 0 {
             out.push_str(&format!(", {} waiting", account.waiting));
         }

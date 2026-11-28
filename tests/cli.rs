@@ -251,7 +251,7 @@ fn user_roster_agents_get_their_env_expanded() {
 
     let listed = stdout(&sandbox.brigade(&["list"]));
     assert!(
-        listed.contains("claude-local:\n  local account: Claude Code on a local model (local, effort medium, from "),
+        listed.contains("claude-local\n  local account: Claude Code on a local model (local, effort medium, from "),
         "{listed}"
     );
 
@@ -1235,6 +1235,12 @@ fn wait_holds_a_run_until_its_accounts_limit_resets() {
     let waited = sandbox.brigade(&["run", "opus", "--wait", "go"]);
     assert!(waited.status.success(), "{}", stderr(&waited));
     assert!(started.elapsed() >= Duration::from_secs(2), "it waited for the reset");
+    assert!(
+        stdout(&waited).contains("[brigade] it waited ")
+            && stdout(&waited).contains("for a usage limit to reset before it ran"),
+        "{}",
+        stdout(&waited)
+    );
     assert_eq!(calls(&sandbox, "claude"), 2);
 }
 
@@ -1389,4 +1395,147 @@ fn refresh_reads_quotas_and_a_used_up_one_holds_runs_back() {
         stderr(&held)
     );
     assert_eq!(calls(&sandbox, "codex"), codex_calls, "the used-up quota spent no call");
+}
+
+#[test]
+fn a_local_agent_takes_the_benchmark_of_the_model_its_server_serves() {
+    let sandbox = Sandbox::new();
+    let models = sandbox.root().join("models.json");
+    fs::write(&models, r#"{"data":[{"id":"qwen3.8-flash-next","object":"model"}]}"#).unwrap();
+    sandbox.user_roster(&format!(
+        r#"
+[benchmark_sources.aa-local]
+name = "Artificial Analysis, full-precision weights"
+url = "https://artificialanalysis.ai/models/qwen3-8-flash-next"
+read = "2026-11-27"
+
+[[served_model]]
+id = "qwen3.8-flash-next"
+best_for = "private, simple or high-volume work"
+benchmark = {{ source = "aa-local", intelligence = 28 }}
+
+[[account]]
+name = "local"
+models_url = "file://{}"
+
+[[account.agent]]
+name = "claude-local"
+harness = "claude"
+model = "local"
+description = "Claude Code on the local model"
+"#,
+        models.display()
+    ));
+
+    let before = stdout(&sandbox.brigade(&["list"]));
+    assert!(
+        before.contains("claude-local\n  local account:"),
+        "nothing known before a refresh: {before}"
+    );
+
+    let refreshed = sandbox.brigade(&["capacity", "--refresh"]);
+    assert!(
+        stdout(&refreshed).contains("local (claude-local): free, 0 running, serving qwen3.8-flash-next"),
+        "{}",
+        stdout(&refreshed)
+    );
+    let listed = stdout(&sandbox.brigade(&["list"]));
+    assert!(
+        listed.contains("Scores (aa-local) are from the Artificial Analysis, full-precision weights"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("claude-local: Best for private, simple or high-volume work. Scores 28 (aa-local).\n"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("(local, the harness's default effort, from "),
+        "{listed}"
+    );
+    assert!(listed.contains(", serving qwen3.8-flash-next)"), "{listed}");
+    let json: serde_json::Value = serde_json::from_str(&stdout(&sandbox.brigade(&["list", "--json"]))).unwrap();
+    let local = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "claude-local")
+        .unwrap();
+    assert_eq!(local["served_model"]["benchmark"]["intelligence"], 28.0);
+    assert_eq!(local["served_model"]["benchmark"]["source"]["key"], "aa-local");
+
+    fs::write(&models, r#"{"data":[{"id":"ornith-1.0-9b"}]}"#).unwrap();
+    sandbox.brigade(&["capacity", "--refresh"]);
+    let switched = stdout(&sandbox.brigade(&["list"]));
+    assert!(
+        switched.contains("claude-local\n"),
+        "a model with no entry says nothing: {switched}"
+    );
+    assert!(switched.contains(", serving ornith-1.0-9b)"), "{switched}");
+}
+
+#[test]
+fn every_route_a_run_leaves_behind_gets_its_own_line() {
+    let sandbox = Sandbox::new();
+    sandbox.user_roster(
+        "[[account]]\nname = \"agy\"\nharness = \"agy\"\nagents = [\"neon\", \"opus\"]\n\n[fallbacks]\nopus = \"sol\"\n",
+    );
+    let output = sandbox
+        .command(&["run", "opus", "go"])
+        .env("FAKE_LIMIT", "claude agy")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(
+        out.contains("[brigade] opus hit a usage limit on the claude account, so opus ran on the agy account instead"),
+        "{out}"
+    );
+    assert!(
+        out.contains("[brigade] opus hit a usage limit on the agy account, so sol ran on the codex account instead: Your AI credits"),
+        "{out}"
+    );
+
+    let resume = sandbox.brigade(&["run", "opus", "--resume", "s-1", "go"]);
+    assert!(
+        stderr(&resume)
+            .contains("opus is offered by the claude and agy accounts; say which one the session is on with --account"),
+        "{}",
+        stderr(&resume)
+    );
+}
+
+#[test]
+fn rosters_that_cant_work_are_refused() {
+    let sandbox = Sandbox::new();
+    for (roster, problem) in [
+        (
+            "[[account]]\nname = \"a\"\n[[account]]\nname = \"a\"\n",
+            "account `a` is defined twice",
+        ),
+        (
+            "[[account]]\nname = \"x\"\nharness = \"codex\"\n[[account.agent]]\nname = \"opus\"\nmodel = \"m\"\ndescription = \"imposter\"\n",
+            "agent `opus` has a catalog agent's name",
+        ),
+        (
+            "[[catalog]]\nname = \"z\"\ndescription = \"z\"\nmodels = { agy = \"m\" }\nefforts = { agy = [\"ultra\"] }\n",
+            "agent `z` takes effort `ultra` in agy",
+        ),
+        (
+            "[[catalog]]\nname = \"z\"\ndescription = \"z\"\nmodels = { agy = \"m\" }\nbenchmark = { source = \"aa\", intelligence = 1000 }\n",
+            "agent `z` scores 1000, outside 0 to 100",
+        ),
+        (
+            "[[catalog]]\nname = \"z\"\ndescription = \"z\"\nmodels = { agy = \"m\" }\nbenchmark = { source = \"nope\", intelligence = 1 }\n",
+            "has a benchmark from `nope`, which isn't a benchmark source",
+        ),
+        (
+            "[benchmark_sources.mine]\nname = \"m\"\nurl = \"u\"\nread = \"yesterday\"\n",
+            "benchmark source `mine` was read on `yesterday`",
+        ),
+    ] {
+        sandbox.user_roster(roster);
+        let listed = sandbox.brigade(&["list"]);
+        assert!(!listed.status.success(), "{roster}");
+        assert!(stderr(&listed).contains(problem), "{}", stderr(&listed));
+    }
 }

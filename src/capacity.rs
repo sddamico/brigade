@@ -28,6 +28,9 @@ pub struct AccountCapacity {
     pub quotas: Vec<Quota>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quotas_read_at: Option<u64>,
+    /// The models the account's server said it had loaded, when last asked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub serving: Vec<String>,
     /// Whether a run on at least one of its agents would start at once.
     pub free: bool,
 }
@@ -103,6 +106,7 @@ pub fn capacity(
                 usage: state.usage,
                 quotas: state.quotas,
                 quotas_read_at: state.quotas_read_at,
+                serving: state.serving,
                 free,
             }
         })
@@ -122,7 +126,21 @@ pub fn refresh(settings: &Settings, roster: &Roster, now: u64) -> Vec<(String, S
             .collect();
         reads.into_iter().filter_map(|read| read.join().ok()).collect()
     });
+    let served: Vec<(String, Result<Vec<String>, String>)> = std::thread::scope(|scope| {
+        let reads: Vec<_> = roster
+            .accounts()
+            .iter()
+            .filter_map(|account| Some((account.name.clone(), account.models_url.clone()?)))
+            .map(|(name, url)| scope.spawn(move || (name, usage::served_models(&url, &var))))
+            .collect();
+        reads.into_iter().filter_map(|read| read.join().ok()).collect()
+    });
     let mut failures = Vec::new();
+    for (account, result) in served {
+        if let Err(error) = result.and_then(|models| accounts::record_serving(settings, &account, models)) {
+            failures.push((account, error));
+        }
+    }
     for (account, result) in results {
         match result.and_then(|quotas| accounts::record_quotas(settings, &account, quotas, now)) {
             Ok(()) => {}

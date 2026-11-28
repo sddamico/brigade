@@ -4,7 +4,11 @@
 
 **Catalog**: the agents any account can opt into: each one's model id in every harness that has it, the efforts it takes there, and what it's best for.
 
-**Benchmark**: how a catalog agent's model scored on the roster's benchmark source (the Artificial Analysis Intelligence Index by default): its index score, the cost and minutes of one index task, and the effort measured at. It's for comparing agents when picking one for a task, and goes stale, so the source names when it was read.
+**Benchmark**: how an agent's model scored on a benchmark source (the Artificial Analysis Intelligence Index by default): its index score, and where known the cost and minutes of one index task and the effort measured at. It's for comparing agents when picking one for a task, and goes stale, so its source names when it was read.
+
+**Benchmark source**: where benchmark figures come from and when they were read, under a key that each benchmark names (`aa` for the built-in Artificial Analysis figures).
+
+**Served model**: the model a server that switches models has loaded, as its `/v1/models` reports it to `capacity --refresh`. An account with `models_url` gives its agents the matching `[[served_model]]` entry's best-for and benchmark.
 
 **Route**: an agent as one account offers it: the harness, model and account a run on it uses. An agent several accounts offer has a route through each, and a run takes the first route with capacity, in account order.
 

@@ -36,9 +36,9 @@ Runs are read-only unless asked to write, and use the agent's model at the harne
 The CLI, with cargo or mise:
 
 ```sh
-cargo install --git https://github.com/sddamico/brigade --tag v0.7.1
+cargo install --git https://github.com/sddamico/brigade --tag v0.8.0
 # or, in ~/.config/mise/config.toml:
-# "cargo:https://github.com/sddamico/brigade" = "tag:v0.7.1"
+# "cargo:https://github.com/sddamico/brigade" = "tag:v0.8.0"
 ```
 
 The plugin, from this repo's marketplace:
@@ -50,13 +50,13 @@ claude plugin install brigade@brigade
 codex plugin marketplace add https://github.com/sddamico/brigade.git
 codex plugin add brigade@brigade
 
-agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.7.1
+agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.8.0
 ```
 
 Codex plugins can't ship subagent roles, so link the roles from Codex's copy of the plugin into `~/.codex/agents`, which Codex searches recursively. Re-point it after a plugin update:
 
 ```sh
-ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.7.1/codex/agents ~/.codex/agents/brigade
+ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.8.0/codex/agents ~/.codex/agents/brigade
 ```
 
 Each agent needs its harness's CLI installed and logged in.
@@ -128,7 +128,25 @@ args = ["--disallowedTools", "Artifact"]
 env = { ANTHROPIC_BASE_URL = "$LOCAL_MODEL_SERVER" }
 ```
 
-An agent more than one account offers has a route through each. `brigade run opus` takes the first route with capacity, in account order: built-in accounts first, a user account that replaces one keeping its place, then the user's others. A route that's limited or full is passed over without spending a call, and a run that hits a limit moves to the next route. `--account <account>` pins a route. `env` and `args` go to the harness's CLI, and `$VAR` and `${VAR}` expand from brigade's environment. Catalog entries of your own (`[[catalog]]`, as in [roster.toml](roster.toml)) add agents any account can opt into. `brigade list` shows every agent, what it's best for, its routes, and how its model scored on the Artificial Analysis Intelligence Index: the score, and the cost and minutes of one of the index's tasks. A `[benchmark_source]` and `benchmark = { ... }` on catalog entries of your own refresh or extend them.
+An agent more than one account offers has a route through each. `brigade run opus` takes the first route with capacity, in account order: built-in accounts first, a user account that replaces one keeping its place, then the user's others. A route that's limited or full is passed over without spending a call, and a run that hits a limit moves to the next route. `--account <account>` pins a route. `env` and `args` go to the harness's CLI, and `$VAR` and `${VAR}` expand from brigade's environment. Catalog entries of your own (`[[catalog]]`, as in [roster.toml](roster.toml)) add agents any account can opt into. `brigade list` shows every agent, what it's best for, its routes, and how its model scored on a benchmark: by default the Artificial Analysis Intelligence Index score, and the cost and minutes of one of its tasks. Each `benchmark = { source = "aa", ... }` names one of the roster's `[benchmark_sources]`, so your own figures stay labelled as yours.
+
+An account on a server that switches models, like a local one, names its model list with `models_url`. `brigade capacity --refresh` asks it which model is loaded, and the account's agents take that model's `[[served_model]]` entry, so switching models needs no roster edit:
+
+```toml
+[benchmark_sources.aa-local]
+name = "Artificial Analysis (full-precision weights, through its providers)"
+url = "https://artificialanalysis.ai/leaderboards/models"
+read = "2026-11-27"
+
+[[served_model]]
+id = "qwen3.8-flash-next"
+best_for = "private, simple or high-volume work"
+benchmark = { source = "aa-local", intelligence = 28 }
+
+[[account]]
+name = "local"
+models_url = "http://my-gpu-box:8000/v1/models"
+```
 
 ## Limits and quotas
 

@@ -68,27 +68,48 @@ impl Agent {
     }
 }
 
-/// How the agent's model scored on the roster's benchmark source, for comparing
-/// agents when picking one for a task.
+/// How an agent's model scored on a benchmark, for comparing agents when
+/// picking one for a task.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Benchmark {
-    /// Its score on the source's index.
+    pub source: BenchmarkSource,
+    /// Its score on the source's index, out of 100.
     pub intelligence: f64,
-    /// What one of the index's tasks cost, in US dollars.
-    pub cost_per_task: f64,
-    pub minutes_per_task: f64,
+    /// What one of the index's tasks cost, in US dollars, through the source's
+    /// providers; unset for a model run on the user's own hardware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_task: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes_per_task: Option<f64>,
     /// The effort the figures were measured at.
-    pub effort: Effort,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
 }
 
-/// Where the catalog's benchmark figures come from, and when they were read.
+/// Where benchmark figures come from, and when they were read.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkSource {
+    /// What the roster calls it, e.g. `aa`.
+    pub key: String,
     pub name: String,
     pub url: String,
+    /// A date, YYYY-MM-DD.
     pub read: String,
+}
+
+/// What a local server's model is, for an account that serves whichever model
+/// is loaded: matched by the id the server reports.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ServedModel {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_for: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub benchmark: Option<Benchmark>,
 }
 
 /// The credentials a route's runs draw on, and so share usage limits with.
@@ -105,6 +126,9 @@ pub struct Account {
 #[derive(Clone, Debug)]
 pub struct AccountDef {
     pub name: String,
+    /// An OpenAI-style model list (`/v1/models`) saying which model the
+    /// account's server has loaded.
+    pub models_url: Option<String>,
     /// The harness its catalog agents run in; an account of only its own
     /// agents may have none.
     pub harness: Option<Harness>,
@@ -134,7 +158,7 @@ pub struct Entry {
 pub struct Roster {
     /// Every route, in account order.
     entries: Vec<Entry>,
-    benchmark_source: Option<BenchmarkSource>,
+    served_models: Vec<ServedModel>,
     accounts: Vec<AccountDef>,
     /// The harnesses the user roster declares.
     harnesses: Vec<CustomHarness>,
@@ -191,9 +215,11 @@ impl fmt::Display for RosterError {
 #[serde(deny_unknown_fields)]
 struct RosterFile {
     #[serde(default)]
-    benchmark_source: Option<BenchmarkSource>,
+    benchmark_sources: BTreeMap<String, SourceEntry>,
     #[serde(default)]
     catalog: Vec<CatalogEntry>,
+    #[serde(default)]
+    served_model: Vec<ServedModelEntry>,
     #[serde(default)]
     account: Vec<AccountEntry>,
     #[serde(default)]
@@ -201,6 +227,40 @@ struct RosterFile {
     /// Agent name to the agent its runs switch to on a usage limit.
     #[serde(default)]
     fallbacks: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceEntry {
+    name: String,
+    url: String,
+    read: String,
+}
+
+/// A benchmark as the roster file writes it: its source by key.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BenchmarkEntry {
+    source: String,
+    intelligence: f64,
+    #[serde(default)]
+    cost_per_task: Option<f64>,
+    #[serde(default)]
+    minutes_per_task: Option<f64>,
+    #[serde(default)]
+    effort: Option<Effort>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServedModelEntry {
+    id: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    best_for: Option<String>,
+    #[serde(default)]
+    benchmark: Option<BenchmarkEntry>,
 }
 
 /// An agent any account can opt into: its model in each harness that has it.
@@ -212,7 +272,7 @@ struct CatalogEntry {
     #[serde(default)]
     best_for: Option<String>,
     #[serde(default)]
-    benchmark: Option<Benchmark>,
+    benchmark: Option<BenchmarkEntry>,
     /// Harness name to the model id that harness calls it.
     models: BTreeMap<String, String>,
     /// Harness name to the efforts the model takes there, where fewer than the
@@ -236,6 +296,10 @@ struct AccountEntry {
     agent: Vec<OwnAgent>,
     #[serde(default)]
     max_runs: Option<u32>,
+    /// A model list (`/v1/models`) saying which model the account's server has
+    /// loaded, for an account whose server switches models.
+    #[serde(default)]
+    models_url: Option<String>,
     /// For every run on the account, e.g. CLAUDE_CONFIG_DIR for a second login.
     #[serde(default)]
     env: BTreeMap<String, String>,
@@ -259,7 +323,7 @@ struct OwnAgent {
     #[serde(default)]
     best_for: Option<String>,
     #[serde(default)]
-    benchmark: Option<Benchmark>,
+    benchmark: Option<BenchmarkEntry>,
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
@@ -302,10 +366,74 @@ impl Roster {
             built_in.catalog.into_iter().map(|c| (c, BUILT_IN_ORIGIN)).collect();
         let mut accounts: Vec<(AccountEntry, Source)> =
             built_in.account.into_iter().map(|a| (a, Source::BuiltIn)).collect();
-        let benchmark_source = user
-            .as_ref()
-            .and_then(|(file, _)| file.benchmark_source.clone())
-            .or(built_in.benchmark_source);
+        let mut sources = built_in.benchmark_sources.clone();
+        let mut served: Vec<(ServedModelEntry, &str)> = Vec::new();
+        if let Some((file, origin)) = &user {
+            sources.extend(file.benchmark_sources.clone());
+            served = file.served_model.iter().map(|m| (m.clone(), origin.as_str())).collect();
+            check_unique(file.account.iter().map(|a| a.name.as_str()), origin, "account")?;
+            check_unique(file.catalog.iter().map(|c| c.name.as_str()), origin, "catalog agent")?;
+            check_unique(file.served_model.iter().map(|m| m.id.as_str()), origin, "served model")?;
+        }
+        for (key, source) in &sources {
+            if !is_date(&source.read) {
+                let origin = match &user {
+                    Some((file, origin)) if file.benchmark_sources.contains_key(key) => origin.as_str(),
+                    _ => BUILT_IN_ORIGIN,
+                };
+                return Err(RosterError::Parse {
+                    origin: origin.to_string(),
+                    message: format!(
+                        "benchmark source `{key}` was read on `{}`, which isn't a YYYY-MM-DD date",
+                        source.read
+                    ),
+                });
+            }
+        }
+        let benchmark =
+            |entry: &Option<BenchmarkEntry>, origin: &str, agent: &str| -> Result<Option<Benchmark>, RosterError> {
+                let Some(entry) = entry else { return Ok(None) };
+                let invalid = |problem: String| RosterError::Invalid {
+                    origin: origin.to_string(),
+                    agent: agent.to_string(),
+                    problem,
+                };
+                let source = sources.get(&entry.source).ok_or_else(|| {
+                    invalid(format!(
+                        "has a benchmark from `{}`, which isn't a benchmark source",
+                        entry.source
+                    ))
+                })?;
+                if !(0.0..=100.0).contains(&entry.intelligence) {
+                    return Err(invalid(format!("scores {}, outside 0 to 100", entry.intelligence)));
+                }
+                if entry.cost_per_task.is_some_and(|c| c < 0.0) || entry.minutes_per_task.is_some_and(|m| m < 0.0) {
+                    return Err(invalid("has a negative cost or time per task".into()));
+                }
+                Ok(Some(Benchmark {
+                    source: BenchmarkSource {
+                        key: entry.source.clone(),
+                        name: source.name.clone(),
+                        url: source.url.clone(),
+                        read: source.read.clone(),
+                    },
+                    intelligence: entry.intelligence,
+                    cost_per_task: entry.cost_per_task,
+                    minutes_per_task: entry.minutes_per_task,
+                    effort: entry.effort,
+                }))
+            };
+        let served_models = served
+            .iter()
+            .map(|(m, origin)| {
+                Ok(ServedModel {
+                    id: m.id.clone(),
+                    description: m.description.clone(),
+                    best_for: m.best_for.clone(),
+                    benchmark: benchmark(&m.benchmark, origin, &m.id)?,
+                })
+            })
+            .collect::<Result<Vec<_>, RosterError>>()?;
         let (harnesses, fallbacks, user_origin) = match &user {
             Some((file, origin)) => (file.harness.clone(), file.fallbacks.clone(), origin.as_str()),
             None => (Vec::new(), BTreeMap::new(), BUILT_IN_ORIGIN),
@@ -335,13 +463,26 @@ impl Roster {
         };
         for (entry, origin) in &catalog {
             check_agent_name(&entry.name, origin)?;
+            let invalid = |problem: String| RosterError::Invalid {
+                origin: origin.to_string(),
+                agent: entry.name.clone(),
+                problem,
+            };
             for harness in entry.models.keys().chain(entry.efforts.keys()) {
                 if harness_named(harness).is_none() {
-                    return Err(RosterError::Invalid {
-                        origin: origin.to_string(),
-                        agent: entry.name.clone(),
-                        problem: format!("names `{harness}`, which isn't a harness brigade knows"),
-                    });
+                    return Err(invalid(format!(
+                        "names `{harness}`, which isn't a harness brigade knows"
+                    )));
+                }
+            }
+            benchmark(&entry.benchmark, origin, &entry.name)?;
+            for (name, efforts) in &entry.efforts {
+                let harness = harness_named(name).expect("checked above");
+                if let Some(effort) = efforts.iter().find(|e| !harness.supports(**e)) {
+                    return Err(invalid(format!(
+                        "takes effort `{effort}` in {name}, which takes {}",
+                        harness.effort_levels()
+                    )));
                 }
             }
         }
@@ -404,7 +545,7 @@ impl Roster {
                         model: model.clone(),
                         effort: None,
                         best_for: entry.best_for.clone(),
-                        benchmark: entry.benchmark.clone(),
+                        benchmark: benchmark(&entry.benchmark, origin, name)?,
                         env: account.env.clone(),
                         args: account.args.clone(),
                         account: reference.clone(),
@@ -420,6 +561,12 @@ impl Roster {
                     agent: own.name.clone(),
                     problem,
                 };
+                if catalog.iter().any(|(c, _)| c.name == own.name) {
+                    return Err(invalid(format!(
+                        "has a catalog agent's name; offer that agent with `agents = [\"{}\"]` on account `{}`",
+                        own.name, account.name
+                    )));
+                }
                 let harness = match own.harness.as_deref().or(account.harness.as_deref()) {
                     Some(name) => harness_named(name)
                         .ok_or_else(|| invalid(format!("runs in `{name}`, which isn't a harness brigade knows")))?,
@@ -438,7 +585,7 @@ impl Roster {
                     efforts: own.efforts.clone(),
                     description: own.description.clone(),
                     best_for: own.best_for.clone(),
-                    benchmark: own.benchmark.clone(),
+                    benchmark: benchmark(&own.benchmark, origin, &own.name)?,
                     env,
                     args: account.args.iter().chain(&own.args).cloned().collect(),
                     account: reference.clone(),
@@ -454,6 +601,7 @@ impl Roster {
             }
             defs.push(AccountDef {
                 name: account.name.clone(),
+                models_url: account.models_url.clone(),
                 harness,
                 env: account.env.clone(),
                 args: account.args.clone(),
@@ -463,7 +611,7 @@ impl Roster {
 
         let mut roster = Roster {
             entries,
-            benchmark_source,
+            served_models,
             accounts: defs,
             harnesses,
         };
@@ -498,8 +646,9 @@ impl Roster {
         Ok(())
     }
 
-    pub fn benchmark_source(&self) -> Option<&BenchmarkSource> {
-        self.benchmark_source.as_ref()
+    /// What the roster knows about the model a server reports it's serving.
+    pub fn served_model(&self, id: &str) -> Option<&ServedModel> {
+        self.served_models.iter().find(|m| m.id == id)
     }
 
     pub fn harnesses(&self) -> &[CustomHarness] {
@@ -566,6 +715,25 @@ fn check_harnesses(harnesses: &[CustomHarness], origin: &str) -> Result<(), Rost
         harness.check().map_err(invalid)?;
     }
     Ok(())
+}
+
+fn check_unique<'a>(names: impl Iterator<Item = &'a str>, origin: &str, what: &str) -> Result<(), RosterError> {
+    let mut seen = HashSet::new();
+    for name in names {
+        if !seen.insert(name) {
+            return Err(RosterError::Parse {
+                origin: origin.to_string(),
+                message: format!("{what} `{name}` is defined twice"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_date(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('-').collect();
+    matches!(parts.as_slice(), [y, m, d] if y.len() == 4 && m.len() == 2 && d.len() == 2
+        && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())))
 }
 
 fn check_agent_name(name: &str, origin: &str) -> Result<(), RosterError> {

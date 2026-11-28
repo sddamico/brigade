@@ -11,6 +11,7 @@ use brigade::settings::{MAX_DEPTH, Settings};
 use brigade::worktree;
 use clap::{Args, Parser, Subcommand};
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -142,21 +143,32 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
     match command {
         Command::List { json } => {
             let roster = Roster::load(&settings.roster_file).map_err(|e| e.to_string())?;
+            // What each switching server last said it had loaded (`capacity --refresh`).
+            let serving: BTreeMap<String, Vec<String>> = roster
+                .accounts()
+                .iter()
+                .filter(|account| account.models_url.is_some())
+                .map(|account| (account.name.clone(), accounts::load(&settings, &account.name).serving))
+                .filter(|(_, models)| !models.is_empty())
+                .collect();
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(roster.entries()).expect("entries serialize")
-                );
+                let routes: Vec<serde_json::Value> = roster
+                    .entries()
+                    .iter()
+                    .map(|entry| {
+                        let mut route = serde_json::to_value(entry).expect("entries serialize");
+                        if let Some(models) = serving.get(&entry.agent.account.name) {
+                            route["serving"] = serde_json::json!(models);
+                        }
+                        if let Some(model) = report::served_model(&roster, &serving, &entry.agent.name) {
+                            route["served_model"] = serde_json::json!(model);
+                        }
+                        route
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&routes).expect("routes serialize"));
             } else {
-                print!(
-                    "{}",
-                    report::roster(
-                        &roster.agents(),
-                        roster.entries(),
-                        roster.benchmark_source(),
-                        &settings.roster_file
-                    )
-                );
+                print!("{}", report::roster(&roster, &serving, &settings.roster_file));
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -284,6 +296,14 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
             return Err(format!("the {account} account doesn't offer {}", args.agent));
         }
     }
+    if args.resume.is_some() && args.account.is_none() && routes.len() > 1 {
+        let accounts: Vec<&str> = routes.iter().map(|a| a.account.name.as_str()).collect();
+        return Err(format!(
+            "{} is offered by the {} accounts; say which one the session is on with --account",
+            args.agent,
+            accounts.join(" and ")
+        ));
+    }
     // A chosen model, or a session to continue, belongs to one route's harness.
     if args.model.is_some() || args.resume.is_some() {
         routes.truncate(1);
@@ -366,7 +386,8 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         started_at: runs::now(),
         next: routes,
         asked_effort: args.effort,
-        fell_back_from: None,
+        fell_back_from: Vec::new(),
+        waited: None,
         wait: args.wait,
     };
     dir.write_request(&record, &task)?;

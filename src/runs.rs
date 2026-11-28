@@ -57,9 +57,12 @@ pub struct RunRecord {
     /// The effort the call asked for, which carries over to a route that takes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_effort: Option<Effort>,
-    /// Set once the run has switched to another route or agent, which `agent` now is.
+    /// Each route or agent the run left behind, in order; `agent` is where it went.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fell_back_from: Vec<FellBack>,
+    /// How long the run waited for capacity before it ran, and what for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fell_back_from: Option<FellBack>,
+    pub waited: Option<Waited>,
     /// Wait for a limited account to free up instead of ending as limited.
     #[serde(default)]
     pub wait: bool,
@@ -78,6 +81,12 @@ pub struct FellBack {
     pub limited: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Waited {
+    pub secs: u64,
+    pub why: String,
+}
+
 /// Why a run left a route behind.
 struct Skip {
     error: String,
@@ -90,7 +99,7 @@ impl RunRecord {
         let rest = self.next.split_off(index + 1);
         let to = self.next.pop().expect("switching to a route the run has");
         self.next = rest;
-        self.fell_back_from = Some(FellBack {
+        self.fell_back_from.push(FellBack {
             agent: self.agent.name.clone(),
             account: self.agent.account.name.clone(),
             harness: self.agent.harness.clone(),
@@ -358,9 +367,17 @@ pub fn execute(
         Err(error) => Outcome::Failed { error: error.clone() },
         Ok(task) => loop {
             let outcome = match take_slot(settings, &record, dir, lease) {
-                Slot::Taken(0, _) => run_harness(settings, &record, dir, task, lease, var),
-                Slot::Taken(index, skip) => {
-                    record = record.switch(index - 1, skip.expect("a route left behind says why"));
+                Slot::Taken(index, skip, waited) => {
+                    if index > 0 {
+                        record = record.switch(index - 1, skip.expect("a route left behind says why"));
+                    }
+                    if let Some(waited) = waited {
+                        let before = record.waited.as_ref().map_or(0, |w| w.secs);
+                        record.waited = Some(Waited {
+                            secs: before + waited.secs,
+                            why: waited.why,
+                        });
+                    }
                     // Written before it starts, so a waiter reports the route that runs.
                     if let Err(error) = dir.write_record(&record) {
                         break Outcome::Failed { error };
@@ -425,8 +442,9 @@ pub fn execute(
 
 enum Slot {
     /// A slot on the route at this index of the run's routes, the current one
-    /// first, and why the current one was left behind if it was.
-    Taken(usize, Option<Skip>),
+    /// first, why the current one was left behind if it was, and how long the
+    /// run waited for it.
+    Taken(usize, Option<Skip>, Option<Waited>),
     /// Every route is limited and the run won't wait: the first route's limit,
     /// and its model when the limit is on the model alone.
     Limited(Limit, Option<String>),
@@ -436,7 +454,9 @@ enum Slot {
 /// Takes a slot on the first route that has capacity. Waits while a route is
 /// only full, or when the run asked to wait out its limits.
 fn take_slot(settings: &Settings, record: &RunRecord, dir: &RunDir, lease: Duration) -> Slot {
-    let mut next_look = Instant::now();
+    let started = Instant::now();
+    let mut next_look = started;
+    let mut waiting_for: Option<String> = None;
     loop {
         if let Some(reason) = stop_reason(dir, lease) {
             return Slot::Ended(Outcome::Cancelled { reason });
@@ -447,7 +467,13 @@ fn take_slot(settings: &Settings, record: &RunRecord, dir: &RunDir, lease: Durat
             let (mut skip, mut first_limit, mut any_full) = (None, None, false);
             for (index, (agent, model)) in routes.enumerate() {
                 match claim(settings, agent, model, &record.id, dir) {
-                    Ok(Claim::Taken) => return Slot::Taken(index, skip),
+                    Ok(Claim::Taken) => {
+                        let waited = waiting_for.map(|why| Waited {
+                            secs: started.elapsed().as_secs(),
+                            why,
+                        });
+                        return Slot::Taken(index, skip, waited);
+                    }
                     Ok(Claim::Limited(limit, scope)) => {
                         if index == 0 {
                             skip = Some(Skip {
@@ -478,6 +504,11 @@ fn take_slot(settings: &Settings, record: &RunRecord, dir: &RunDir, lease: Durat
             {
                 return Slot::Limited(limit, scope);
             }
+            waiting_for = Some(if any_full {
+                "for a free slot".to_string()
+            } else {
+                "for a usage limit to reset".to_string()
+            });
             next_look = Instant::now() + SLOT_POLL;
         }
         std::thread::sleep(POLL);

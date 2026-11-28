@@ -30,7 +30,15 @@ pub fn read(account: &AccountDef, var: &dyn Fn(&str) -> Option<String>, now: u64
     match &account.harness {
         Some(Harness::Claude) => {
             let out = output(Command::new("claude").args(["-p", "/usage"]).args(&args).envs(env))?;
-            Ok(claude_quotas(&out, now))
+            let quotas = claude_quotas(&out, now);
+            // A login with no subscription, or none at all, prints no windows.
+            if quotas.is_empty() {
+                return Err(
+                    "Claude Code's /usage reported no usage windows; is the account logged in to a subscription?"
+                        .into(),
+                );
+            }
+            Ok(quotas)
         }
         Some(Harness::Agy) => {
             let out = output(
@@ -44,6 +52,24 @@ pub fn read(account: &AccountDef, var: &dyn Fn(&str) -> Option<String>, now: u64
         Some(Harness::Codex) => codex_quotas(&codex_rate_limits(&args, env)?),
         _ => Err("has no harness brigade can read usage from".into()),
     }
+}
+
+/// The models an OpenAI-compatible server lists at `url` (`/v1/models`), which
+/// for a local server is what it has loaded.
+pub fn served_models(url: &str, var: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>, String> {
+    let url = expand(url, var).map_err(|e| format!("needs ${}, which isn't set", e.0))?;
+    let out = output(Command::new("curl").args(["--silent", "--show-error", "--max-time", "10", &url]))?;
+    let v: Value = serde_json::from_str(out.trim()).map_err(|_| format!("{url} didn't list models as JSON"))?;
+    let ids: Vec<String> = v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["id"].as_str().map(String::from))
+        .collect();
+    if ids.is_empty() {
+        return Err(format!("{url} listed no models"));
+    }
+    Ok(ids)
 }
 
 fn output(command: &mut Command) -> Result<String, String> {

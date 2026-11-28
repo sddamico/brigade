@@ -32,6 +32,9 @@ pub struct AccountState {
     pub quotas: Vec<Quota>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quotas_read_at: Option<u64>,
+    /// The models the account's server said it had loaded, when last asked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serving: Vec<String>,
 }
 
 /// A usage window a set of models on an account share, as the harness reports
@@ -314,6 +317,13 @@ pub fn record_quotas(settings: &Settings, account: &str, quotas: Vec<Quota>, now
     save(settings, account, &state)
 }
 
+pub fn record_serving(settings: &Settings, account: &str, models: Vec<String>) -> Result<(), String> {
+    let _lock = lock(settings, account)?;
+    let mut state = load(settings, account);
+    state.serving = models;
+    save(settings, account, &state)
+}
+
 pub fn record_usage(settings: &Settings, account: &str, usage: Usage) -> Result<(), String> {
     let _lock = lock(settings, account)?;
     let mut state = load(settings, account);
@@ -571,6 +581,12 @@ mod tests {
         assert_eq!((limit.until, scope.as_deref()), (Some(5_000), Some("gemini-3.8-flash")));
         assert_eq!(limit.message, "Gemini Models, weekly is used up");
         assert_eq!(state.limit_on("claude-opus-5-5", 2_000), None, "its group has room");
+        let mut spent = state.clone();
+        spent.quotas[1].used = 1.0;
+        let (limit, _) = spent
+            .limit_on("claude-opus-5-5", 2_000)
+            .expect("agy's \"Claude Opus 5.5\" is claude-opus-5-5");
+        assert_eq!(limit.message, "Claude and GPT models, 5h is used up");
         assert_eq!(state.limit_on("gemini-4-neon", 5_000), None, "free once it resets");
     }
 
