@@ -27,7 +27,8 @@ const KEYWORDS: [&str; 5] = ["subagents", "multi-agent", "codex", "antigravity",
 /// model, the smallest that relays replies faithfully.
 // haiku paraphrased long replies, and once a [brigade] line, despite the instructions.
 const CLAUDE_FORWARDER_MODEL: &str = "sonnet";
-const CODEX_FORWARDER_MODEL: &str = "gpt-6-luna";
+// gpt-6-luna reworded about one relay in four.
+const CODEX_FORWARDER_MODEL: &str = "gpt-6.1-terra";
 const CODEX_FORWARDER_EFFORT: &str = "low";
 // flash_lite answered trivial tasks itself instead of running brigade.
 const AGY_FORWARDER_TIER: &str = "flash";
@@ -133,7 +134,6 @@ pub fn installed_forwarders(roster: &Roster) -> Vec<Installed> {
             files.push(Installed {
                 host: host.clone(),
                 file: custom::fill(&spec.file, &[("name", name)]),
-                // The instructions go in last, so nothing in them is taken for a placeholder.
                 contents: custom::fill(
                     &spec.template,
                     &[

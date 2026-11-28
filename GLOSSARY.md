@@ -12,7 +12,7 @@
 
 **Native subagent**: the host's ordinary subagent, used for an agent from the host's own family (opus in Claude Code, sol in Codex, neon in agy). brigade ships no definition for these and isn't involved.
 
-**Forwarder**: a subagent definition whose only job is to start a run through the brigade CLI and return the reply. A host gets one for each agent from another harness. Forwarders run on a small model of the host's: sonnet in Claude Code, gpt-6-luna in Codex, the flash tier in agy. `forward` is the generic forwarder, which takes the agent's name from the request and covers user-roster agents. `brigade install-agents` gives each user-roster agent a forwarder of its own, in each harness's user-level agents directory.
+**Forwarder**: a subagent definition whose only job is to start a run through the brigade CLI and return the reply. A host gets one for each agent from another harness. Forwarders run on a small model of the host's: sonnet in Claude Code, gpt-6.1-terra in Codex, the flash tier in agy. `forward` is the generic forwarder, which takes the agent's name from the request and covers user-roster agents. `brigade install-agents` gives each user-roster agent a forwarder of its own, in each harness's user-level agents directory.
 
 **Run**: one task handed to one agent through the brigade CLI. Each run has an id (`<agent>-<hex>`) and a directory under `~/.local/state/brigade/runs/` holding the request, the harness's logs and the outcome.
 
@@ -33,6 +33,14 @@
 **Usage limit**: the harness's account running out of usage, such as Claude Code's session or weekly limit, Codex's usage limit or agy's quota. A run that hits one ends as limited, with exit code 4, apart from other failures, because retrying it before the limit resets fails the same way.
 
 **Fallback**: the agent a run switches to when its agent hits a usage limit, chosen ahead of time in the user roster's `[fallbacks]` table or with `--fallback` on the call. The fallback gets the same task, in the same directory or worktree, on its own model and effort. Only one switch is made: a fallback's own fallback is never followed, and a resumed session never falls back.
+
+**Account**: the credentials an agent's runs draw on, and so share usage limits and slots with. An agent's account is its harness's name unless the roster names another, as claude-local's `local` does.
+
+**Capacity**: whether an account can take another run now: not while it's limited, or while it has its `max_runs` running.
+
+**Limit state**: what brigade remembers about a usage limit: since when, until when if the harness said, otherwise when it lets one run try again, and the harness's message. It covers one model on an account, or the whole account when the harness says the window spans it (Claude Code's five-hour and seven-day windows). A run that gets through clears its model's limit and any on the account.
+
+**Waiting run**: a run brigade has accepted but holds until its account has capacity: for a slot on a full account, or for a limit to reset when the run asked to `--wait`.
 
 **Team**: several runs of one agent at once, one task each.
 

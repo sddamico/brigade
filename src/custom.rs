@@ -200,13 +200,15 @@ pub enum Parsed {
 pub fn parse(harness: &CustomHarness, stdout: &str, stderr: &str, succeeded: bool) -> Parsed {
     let spec = &harness.output;
     let limited = |error: &str| spec.limit_signs.iter().any(|s| error.contains(s) || stderr.contains(s));
+    // A CLI that dies on a limit often says so only on stderr, in any format.
+    let no_result = |problem: String| match spec.limit_signs.iter().any(|s| stderr.contains(s.as_str())) {
+        true => Parsed::Limited(stderr_line(stderr, &spec.limit_signs)),
+        false => Parsed::NoResult(problem),
+    };
     let events: Vec<Value> = match spec.format {
         OutputFormat::Text => {
             if !succeeded {
-                return match spec.limit_signs.iter().find(|s| stderr.contains(s.as_str())) {
-                    Some(_) => Parsed::Limited(last_line(stderr)),
-                    None => Parsed::NoResult(format!("`{}` failed", harness.program)),
-                };
+                return no_result(format!("`{}` failed", harness.program));
             }
             return Parsed::Reply {
                 session: None,
@@ -215,7 +217,7 @@ pub fn parse(harness: &CustomHarness, stdout: &str, stderr: &str, succeeded: boo
         }
         OutputFormat::Json => match serde_json::from_str(stdout.trim()) {
             Ok(value) => vec![value],
-            Err(_) => return Parsed::NoResult(format!("`{}` didn't print a JSON result", harness.program)),
+            Err(_) => return no_result(format!("`{}` didn't print a JSON result", harness.program)),
         },
         OutputFormat::Jsonl => stdout.lines().filter_map(|l| serde_json::from_str(l).ok()).collect(),
     };
@@ -240,7 +242,7 @@ pub fn parse(harness: &CustomHarness, stdout: &str, stderr: &str, succeeded: boo
             session: find(&spec.session, false),
             message: message.trim_end().to_string(),
         },
-        None => Parsed::NoResult(format!(
+        None => no_result(format!(
             "`{}` printed no reply at {}",
             harness.program,
             spec.reply.as_deref().unwrap_or_default()
@@ -258,11 +260,14 @@ fn text(value: &Value) -> Option<String> {
     }
 }
 
-fn last_line(text: &str) -> String {
-    text.lines()
+/// The last stderr line with a limit sign in it, which says what the limit was.
+fn stderr_line(stderr: &str, signs: &[String]) -> String {
+    stderr
+        .lines()
         .rev()
-        .find(|l| !l.trim().is_empty())
+        .find(|line| signs.iter().any(|s| line.contains(s.as_str())))
         .unwrap_or_default()
+        .trim()
         .to_string()
 }
 
@@ -283,11 +288,32 @@ pub fn placeholders(template: &str) -> Vec<&str> {
     found
 }
 
+/// Fills the template's placeholders in one pass, so nothing a value brings
+/// in, like `{cwd}` in a task, is taken for a placeholder itself.
 pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
-    let mut out = template.to_string();
-    for (name, value) in values {
-        out = out.replace(&format!("{{{name}}}"), value);
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let value = after.find('}').and_then(|end| {
+            values
+                .iter()
+                .find(|(name, _)| *name == &after[..end])
+                .map(|v| (end, v.1))
+        });
+        match value {
+            Some((end, value)) => {
+                out.push_str(value);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
     }
+    out.push_str(rest);
     out
 }
 
@@ -367,6 +393,21 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_in_an_argument_keeps_braces_that_look_like_placeholders() {
+        let mut harness = muse(OutputFormat::Json);
+        harness.args.push("--prompt={prompt}".into());
+        let args = Args {
+            model: "muse-2",
+            effort: None,
+            access: Access::Write,
+            resume: None,
+            cwd: "/w",
+        };
+        let (line, _) = harness.args(&args, "print f\"{cwd} {session} {model}\"");
+        assert_eq!(line[3], "--prompt=print f\"{cwd} {session} {model}\"");
+    }
+
+    #[test]
     fn check_catches_templates_that_cant_work() {
         assert_eq!(muse(OutputFormat::Json).check(), Ok(()));
         type Breaks = fn(&mut CustomHarness);
@@ -418,6 +459,15 @@ mod tests {
             }
             _ => panic!("expected a reply"),
         }
+
+        assert!(matches!(
+            parse(&json, "", "fatal: you hit your usage limit\n", false),
+            Parsed::Limited(e) if e == "fatal: you hit your usage limit"
+        ));
+        assert!(matches!(
+            parse(&jsonl, "", "warming up\nyou hit your usage limit\n", false),
+            Parsed::Limited(e) if e == "you hit your usage limit"
+        ));
 
         let text = muse(OutputFormat::Text);
         assert!(matches!(parse(&text, "hello\n", "", true), Parsed::Reply { message, .. } if message == "hello"));

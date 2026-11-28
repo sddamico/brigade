@@ -6,6 +6,8 @@
 # effort:   optional; without it, and without --effort on the call, the harness's
 #           own default effort applies
 # env/args: extra environment and CLI arguments; values expand $VAR and ${VAR}
+# account:  optional; the credentials the agent's runs share limits with, the
+#           harness's name by default. [[account]] tables can cap max_runs
 #
 # A user roster can also declare harnesses of its own in [[harness]] tables
 # (see the README), and have a [fallbacks] table, `sol = "opus"`, naming the

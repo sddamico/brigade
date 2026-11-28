@@ -25,6 +25,17 @@ pub struct Agent {
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    pub account: Account,
+}
+
+/// The credentials an agent's runs draw on, and so share usage limits with.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Account {
+    pub name: String,
+    /// How many runs the account serves at once; no cap when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runs: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -97,6 +108,8 @@ struct RosterFile {
     agent: Vec<RosterAgent>,
     #[serde(default)]
     harness: Vec<CustomHarness>,
+    #[serde(default)]
+    account: Vec<Account>,
     /// Agent name to the agent its runs switch to on a usage limit.
     #[serde(default)]
     fallbacks: BTreeMap<String, String>,
@@ -117,11 +130,15 @@ struct RosterAgent {
     env: BTreeMap<String, String>,
     #[serde(default)]
     args: Vec<String>,
+    /// Defaults to the harness's name.
+    #[serde(default)]
+    account: Option<String>,
 }
 
 struct ParsedFile {
     agents: Vec<Agent>,
     harnesses: Vec<CustomHarness>,
+    accounts: Vec<Account>,
     fallbacks: BTreeMap<String, String>,
 }
 
@@ -160,6 +177,7 @@ impl Roster {
                     });
                 }
                 roster.set_fallbacks(file.fallbacks, &origin)?;
+                roster.set_accounts(&file.accounts);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -181,6 +199,16 @@ impl Roster {
 
     /// Fallbacks name agents from the whole roster, built-in ones included, so
     /// they're checked once the user's agents are in.
+    /// Account settings apply to built-in agents too, so they're laid on once
+    /// the user's agents are in.
+    fn set_accounts(&mut self, accounts: &[Account]) {
+        for entry in &mut self.entries {
+            if let Some(account) = accounts.iter().find(|a| a.name == entry.agent.account.name) {
+                entry.agent.account.max_runs = account.max_runs;
+            }
+        }
+    }
+
     fn set_fallbacks(&mut self, fallbacks: BTreeMap<String, String>, origin: &str) -> Result<(), RosterError> {
         for (name, fallback) in fallbacks {
             let invalid = |problem: String| RosterError::Invalid {
@@ -281,7 +309,17 @@ fn parse_file(text: &str, origin: &str) -> Result<ParsedFile, RosterError> {
         if let Some(effort) = raw.effort.filter(|e| !harness.supports(*e)) {
             return Err(invalid(unsupported_effort(&harness, effort)));
         }
+        let account = raw.account.unwrap_or_else(|| harness.name().to_string());
+        if !is_valid_name(&account) {
+            return Err(invalid(format!(
+                "has account `{account}`, which needs a name of lowercase letters, digits and hyphens"
+            )));
+        }
         agents.push(Agent {
+            account: Account {
+                name: account,
+                max_runs: None,
+            },
             name: raw.name,
             harness,
             model: raw.model,
@@ -291,16 +329,32 @@ fn parse_file(text: &str, origin: &str) -> Result<ParsedFile, RosterError> {
             args: raw.args,
         });
     }
+    let mut seen = HashSet::new();
+    for account in &file.account {
+        let invalid = |problem: &str| RosterError::Parse {
+            origin: origin.to_string(),
+            message: format!("account `{}` {problem}", account.name),
+        };
+        if !is_valid_name(&account.name) {
+            return Err(invalid("needs a name of lowercase letters, digits and hyphens"));
+        }
+        if !seen.insert(account.name.as_str()) {
+            return Err(invalid("is defined twice"));
+        }
+        if account.max_runs == Some(0) {
+            return Err(invalid("has max_runs 0, so it could never run anything"));
+        }
+    }
     Ok(ParsedFile {
         agents,
+        accounts: file.account,
         harnesses: file.harness,
         fallbacks: file.fallbacks,
     })
 }
 
 pub fn unsupported_effort(harness: &Harness, effort: Effort) -> String {
-    let levels: Vec<&str> = harness.efforts().iter().map(|e| e.as_str()).collect();
-    format!("has effort `{effort}`, but {harness} takes {}", levels.join(", "))
+    format!("has effort `{effort}`, but {harness} takes {}", harness.effort_levels())
 }
 
 fn is_valid_name(name: &str) -> bool {
@@ -372,7 +426,7 @@ mod tests {
         );
         let error = Roster::load(file.path()).unwrap_err().to_string();
         assert!(
-            error.contains("effort `ultra`, but agy takes low, medium, high, xhigh"),
+            error.contains("effort `ultra`, but agy takes effort low, medium, high, xhigh"),
             "{error}"
         );
     }

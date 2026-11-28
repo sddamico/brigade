@@ -96,6 +96,25 @@ impl Harness {
     pub fn supports(&self, effort: Effort) -> bool {
         self.efforts().contains(&effort)
     }
+
+    /// The efforts it takes, as error messages name them.
+    pub fn effort_levels(&self) -> String {
+        match self.efforts() {
+            [] => "no effort levels".to_string(),
+            levels => {
+                let names: Vec<&str> = levels.iter().map(|e| e.as_str()).collect();
+                format!("effort {}", names.join(", "))
+            }
+        }
+    }
+
+    /// A custom harness declared without `resume_args` can't continue a session.
+    pub fn can_resume(&self) -> bool {
+        match self {
+            Harness::Custom(custom) => !custom.resume_args.is_empty(),
+            _ => true,
+        }
+    }
 }
 
 impl fmt::Display for Harness {

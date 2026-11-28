@@ -8,6 +8,7 @@
 //! and a worker whose lease lapses cancels its run. Stopping a forwarder
 //! subagent, or the session it belongs to, stops the waiting and so the work.
 
+use crate::accounts::{self, Limit, Usage};
 use crate::harness::{Access, Effort, Harness};
 use crate::invocation::{self, ParseFailure, Request};
 use crate::process::Tree;
@@ -23,6 +24,11 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const POLL: Duration = Duration::from_millis(500);
+/// How often a waiting run looks for a slot on its account. Each look takes the
+/// account's lock and reads every run, so it's slower than the lease checks.
+const SLOT_POLL: Duration = Duration::from_secs(2);
+/// Claude Code's usage windows that span every model on the account.
+const ACCOUNT_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
 /// How long a harness gets to exit after SIGTERM before it is killed.
 const TERM_GRACE: Duration = Duration::from_secs(5);
 
@@ -50,6 +56,9 @@ pub struct RunRecord {
     /// Set once the run has switched to its fallback, which `agent` now is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fell_back_from: Option<FellBack>,
+    /// Wait for a limited account to free up instead of ending as limited.
+    #[serde(default)]
+    pub wait: bool,
 }
 
 /// The agent a run started on before a usage limit made it switch.
@@ -90,6 +99,18 @@ pub enum Outcome {
     /// The harness's account ran out of usage, so retrying now would fail too.
     Limited {
         error: String,
+        /// False when brigade knew the account was limited and didn't start
+        /// the harness at all.
+        ran: bool,
+        /// When the account frees up, if the harness said.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<u64>,
+        /// With no reset time, when brigade lets one run try the account again.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_at: Option<u64>,
+        /// The model the limit is on, when it isn't on the whole account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     Cancelled {
         reason: String,
@@ -99,6 +120,8 @@ pub enum Outcome {
 #[derive(Debug, PartialEq)]
 pub enum State {
     Finished(Outcome),
+    /// Accepted, but held until its account has capacity.
+    Waiting,
     Running,
     /// The worker process is gone and never wrote an outcome.
     Lost,
@@ -156,10 +179,21 @@ impl RunDir {
         self.path.join(name)
     }
 
+    /// A new run waits until its worker takes a slot on the account, so it
+    /// isn't counted against the account's runs before then.
     pub fn write_request(&self, record: &RunRecord, task: &str) -> Result<(), String> {
         self.renew_lease()?;
+        self.mark_waiting()?;
         write_atomic(&self.file("task.txt"), task.as_bytes())?;
         self.write_record(record)
+    }
+
+    fn mark_waiting(&self) -> Result<(), String> {
+        write_atomic(&self.file("waiting"), b"")
+    }
+
+    fn is_waiting(&self) -> bool {
+        self.file("waiting").exists()
     }
 
     fn write_record(&self, record: &RunRecord) -> Result<(), String> {
@@ -219,6 +253,7 @@ impl RunDir {
                 None => State::Lost,
             },
             // No pid yet means the starter hasn't recorded its worker yet.
+            _ if self.is_waiting() => State::Waiting,
             _ => State::Running,
         }
     }
@@ -230,7 +265,8 @@ impl RunDir {
         loop {
             let _ = self.renew_lease();
             let state = self.state();
-            if state != State::Running || interrupted() || deadline.is_some_and(|d| Instant::now() >= d) {
+            let going = matches!(state, State::Running | State::Waiting);
+            if !going || interrupted() || deadline.is_some_and(|d| Instant::now() >= d) {
                 return state;
             }
             std::thread::sleep(POLL);
@@ -247,7 +283,7 @@ impl RunDir {
         let deadline = Instant::now() + TERM_GRACE * 3;
         while Instant::now() < deadline {
             match self.state() {
-                State::Running => std::thread::sleep(POLL),
+                State::Running | State::Waiting => std::thread::sleep(POLL),
                 State::Lost => break,
                 finished => return Ok(finished),
             }
@@ -286,26 +322,46 @@ pub fn spawn_worker(record: &RunRecord, dir: &RunDir) -> Result<Child, String> {
     Ok(child)
 }
 
-/// The worker's job: runs the harness CLI for `record` until it exits, the run
-/// is cancelled or its lease lapses, and records the outcome.
-pub fn execute(record: RunRecord, dir: &RunDir, lease: Duration, var: &dyn Fn(&str) -> Option<String>) -> Outcome {
+/// The worker's job: takes a slot on the run's account, runs the harness CLI
+/// until it exits, the run is cancelled or its lease lapses, and records the
+/// outcome. A limited account, known beforehand or hit during the run, hands
+/// the run to its fallback when it has one.
+pub fn execute(
+    settings: &Settings,
+    record: RunRecord,
+    dir: &RunDir,
+    lease: Duration,
+    var: &dyn Fn(&str) -> Option<String>,
+) -> Outcome {
     let mut record = record;
     let task = dir.task();
-    let mut outcome = match &task {
-        Ok(task) => run_harness(&record, dir, task, lease, var),
+    let outcome = match &task {
         Err(error) => Outcome::Failed { error: error.clone() },
+        Ok(task) => loop {
+            let outcome = match take_slot(settings, &record, dir, lease) {
+                Slot::Taken => run_harness(settings, &record, dir, task, lease, var),
+                Slot::Limited(limit, model) => Outcome::Limited {
+                    error: limit.message,
+                    ran: false,
+                    until: limit.until,
+                    retry_at: limit.until.is_none().then_some(limit.retry_at),
+                    model,
+                },
+                Slot::Ended(outcome) => outcome,
+            };
+            match (&outcome, record.fallback.clone()) {
+                (Outcome::Limited { error, .. }, Some(fallback)) => {
+                    record = record.fall_back(fallback, error);
+                    // Written before the fallback starts, so a waiter reports the agent that runs.
+                    // The run gives up its slot and waits for one on the fallback's account.
+                    if let Err(error) = dir.write_record(&record).and_then(|_| dir.mark_waiting()) {
+                        break Outcome::Failed { error };
+                    }
+                }
+                _ => break outcome,
+            }
+        },
     };
-    if let Outcome::Limited { error } = &outcome
-        && let Some(fallback) = record.fallback.clone()
-        && let Ok(task) = &task
-    {
-        record = record.fall_back(fallback, error);
-        // Written before the fallback starts, so a waiter reports the agent that ran.
-        outcome = match dir.write_record(&record) {
-            Ok(()) => run_harness(&record, dir, task, lease, var),
-            Err(error) => Outcome::Failed { error },
-        };
-    }
     let record = &record;
     if let Some(worktree) = &record.worktree {
         let state = match &outcome {
@@ -331,7 +387,97 @@ pub fn execute(record: RunRecord, dir: &RunDir, lease: Duration, var: &dyn Fn(&s
     outcome
 }
 
+enum Slot {
+    Taken,
+    /// The account, or the model alone when it names one, is limited and the
+    /// run won't wait for it.
+    Limited(Limit, Option<String>),
+    Ended(Outcome),
+}
+
+/// Waits until the run's account can take it, unless the account is limited
+/// and the run has a fallback to go to or wasn't asked to wait.
+fn take_slot(settings: &Settings, record: &RunRecord, dir: &RunDir, lease: Duration) -> Slot {
+    let mut next_look = Instant::now();
+    loop {
+        if let Some(reason) = stop_reason(dir, lease) {
+            return Slot::Ended(Outcome::Cancelled { reason });
+        }
+        if Instant::now() >= next_look {
+            match claim(settings, record, dir) {
+                Ok(Claim::Taken) => return Slot::Taken,
+                Ok(Claim::Limited(limit, model)) if !record.wait || record.fallback.is_some() => {
+                    return Slot::Limited(limit, model);
+                }
+                Ok(_) => next_look = Instant::now() + SLOT_POLL,
+                Err(error) => return Slot::Ended(Outcome::Failed { error }),
+            }
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+enum Claim {
+    Taken,
+    Limited(Limit, Option<String>),
+    Full,
+}
+
+/// Takes one of the account's slots under its lock, so two runs can't both
+/// take the last one.
+fn claim(settings: &Settings, record: &RunRecord, dir: &RunDir) -> Result<Claim, String> {
+    let account = &record.agent.account;
+    let _lock = accounts::lock(settings, &account.name)?;
+    let state = accounts::load(settings, &account.name);
+    if let Some(limit) = state.limit_on(&record.model, now()) {
+        let model = (state.limit.as_ref() != Some(limit)).then(|| record.model.clone());
+        return Ok(Claim::Limited(limit.clone(), model));
+    }
+    if let Some(max) = account.max_runs {
+        let running = list(settings)
+            .into_iter()
+            .filter(|run| run.record.agent.account.name == account.name && run.state == State::Running)
+            .count();
+        if running >= max as usize {
+            return Ok(Claim::Full);
+        }
+    }
+    fs::remove_file(dir.file("waiting")).map_err(|e| format!("can't take a slot: {e}"))?;
+    Ok(Claim::Taken)
+}
+
+fn stop_reason(dir: &RunDir, lease: Duration) -> Option<String> {
+    dir.cancel_reason()
+        .or_else(|| (dir.lease_age() > lease).then(|| format!("nobody waited on it for {}s", lease.as_secs())))
+}
+
+/// A run as `brigade runs` and the account checks see it.
+pub struct Run {
+    pub record: RunRecord,
+    pub dir: RunDir,
+    pub state: State,
+}
+
+/// Every run brigade has a directory for, oldest first.
+pub fn list(settings: &Settings) -> Vec<Run> {
+    let Ok(entries) = fs::read_dir(settings.runs_dir()) else {
+        return Vec::new();
+    };
+    let mut runs: Vec<Run> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let dir = RunDir { path: entry.path() };
+            let record = dir.record().ok()?;
+            let state = dir.state();
+            Some(Run { record, dir, state })
+        })
+        .collect();
+    runs.sort_by_key(|run| run.record.started_at);
+    runs
+}
+
 fn run_harness(
+    settings: &Settings,
     record: &RunRecord,
     dir: &RunDir,
     task: &str,
@@ -423,10 +569,7 @@ fn run_harness(
                 };
             }
         }
-        let reason = dir
-            .cancel_reason()
-            .or_else(|| (dir.lease_age() > lease).then(|| format!("nobody waited on it for {}s", lease.as_secs())));
-        if let Some(reason) = reason {
+        if let Some(reason) = stop_reason(dir, lease) {
             stop(&mut child);
             return Outcome::Cancelled { reason };
         }
@@ -436,7 +579,8 @@ fn run_harness(
     let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
     let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
     let last_message = fs::read_to_string(&last_message_file).ok();
-    match invocation::parse(
+    let usage = invocation::usage(&record.agent.harness, &stdout);
+    let outcome = match invocation::parse(
         &record.agent.harness,
         &stdout,
         &stderr,
@@ -448,7 +592,13 @@ fn run_harness(
             message: reply.message,
         },
         // The harness's own error already says it all; its stderr would repeat it.
-        Err(ParseFailure::Limited(error)) => Outcome::Limited { error },
+        Err(ParseFailure::Limited(error)) => Outcome::Limited {
+            error,
+            ran: true,
+            until: None,
+            retry_at: None,
+            model: None,
+        },
         Err(ParseFailure::Reported(error)) => Outcome::Failed { error },
         Err(ParseFailure::NoResult(error)) if status.success() => Outcome::Failed { error },
         Err(ParseFailure::NoResult(error)) => {
@@ -462,6 +612,46 @@ fn run_harness(
                 error: format!("`{}` exited with {status}: {error}{detail}", invocation.program),
             }
         }
+    };
+    note_account(settings, record, outcome, usage)
+}
+
+/// Records what the run showed about its account, and fills a limited
+/// outcome in with when the account frees up.
+fn note_account(settings: &Settings, record: &RunRecord, outcome: Outcome, usage: Option<Usage>) -> Outcome {
+    let account = &record.agent.account.name;
+    let now = now();
+    let rejected = usage.as_ref().filter(|u| u.status == "rejected");
+    let rejected_until = rejected.and_then(|u| u.resets_at);
+    // Claude Code names the window it hit. Its five-hour and seven-day windows
+    // cover the whole account; anything else, and every other harness's limit,
+    // is taken to be the model's own.
+    let account_wide = rejected
+        .and_then(|u| u.window.as_deref())
+        .is_some_and(|w| ACCOUNT_WINDOWS.contains(&w));
+    let model = (!account_wide).then_some(record.model.as_str());
+    if let Some(usage) = usage {
+        let _ = accounts::record_usage(settings, account, Usage { at: now, ..usage });
+    }
+    match outcome {
+        Outcome::Limited { error, ran, .. } => {
+            let until = rejected_until.or_else(|| accounts::reset_in_message(&error));
+            let _ = accounts::record_limit(settings, account, model, &error, until, now);
+            let state = accounts::load(settings, account);
+            let limit = state.limit_on(&record.model, now);
+            Outcome::Limited {
+                error,
+                ran,
+                until,
+                retry_at: limit.filter(|l| l.until.is_none()).map(|l| l.retry_at),
+                model: model.map(String::from),
+            }
+        }
+        Outcome::Done { .. } => {
+            let _ = accounts::record_success(settings, account, &record.model);
+            outcome
+        }
+        outcome => outcome,
     }
 }
 

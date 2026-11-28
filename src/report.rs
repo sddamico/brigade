@@ -1,9 +1,11 @@
 //! What brigade prints. Forwarder agents hand this output back verbatim, so the
 //! footer carries everything the orchestrating agent needs to continue a run.
 
+use crate::accounts::{Limit, local_time};
+use crate::capacity::AccountCapacity;
 use crate::harness::{Access, Effort};
 use crate::roster::{Entry, Source};
-use crate::runs::{Outcome, RunRecord, State};
+use crate::runs::{Outcome, Run, RunRecord, State};
 use crate::worktree::{WorktreeReport, WorktreeState};
 use serde_json::json;
 use std::path::Path;
@@ -58,14 +60,50 @@ pub fn failed(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&Wo
 
 /// Hosts often answer without loading the skill, so the advice on what to do
 /// next travels in the reply itself.
-pub fn limited(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&WorktreeReport>) -> String {
-    let harness = record.agent.harness.product();
+pub fn limited(record: &RunRecord, outcome: &Outcome, logs: &Path, worktree: Option<&WorktreeReport>) -> String {
+    let Outcome::Limited {
+        error,
+        ran,
+        until,
+        retry_at,
+        model,
+    } = outcome
+    else {
+        unreachable!("only limited outcomes are reported as limited")
+    };
+    let (agent, harness, account) = (
+        &record.agent.name,
+        record.agent.harness.product(),
+        &record.agent.account.name,
+    );
+    let limited = match model {
+        Some(model) => format!("{model} on the {account} account"),
+        None => format!("the {account} account"),
+    };
+    let what = if *ran {
+        format!("[brigade] {agent} hit a usage limit in {harness}: {error}\n")
+    } else {
+        format!("[brigade] {agent} didn't run: {limited} is still limited: {error}\n")
+    };
+    let when = match (until, retry_at) {
+        (Some(until), _) => format!("[brigade] {limited} is limited until {}\n", local_time(*until)),
+        (None, Some(retry)) => format!(
+            "[brigade] {harness} gave no reset time, so brigade lets one run try {limited} again after {}\n",
+            local_time(*retry)
+        ),
+        (None, None) => String::new(),
+    };
+    let shared = match model {
+        Some(model) => {
+            format!("runs on {model} share this limit, though other models on the {account} account may not")
+        }
+        None => format!("agents on the {account} account share this limit"),
+    };
     format!(
-        "{}[brigade] {} hit a usage limit in {harness}: {error}\n\
-         [brigade] {harness}'s other agents usually share this limit, so don't retry, switch to another agent \
-         or answer in its place. Tell the user what it said, including when it resets if it says, and let them choose what to do\n{}[brigade] logs: {}\n",
+        "{}{what}{when}[brigade] {shared}, so don't retry, switch to another agent or answer in its place. Tell the \
+         user what it said and let them choose what to do; `brigade capacity` shows which agents are free\n{}\
+         [brigade] logs: {}\n",
         fell_back(record),
-        record.agent.name,
         worktree_lines(record, worktree),
         logs.display()
     )
@@ -176,6 +214,16 @@ pub fn still_running(record: &RunRecord, waited: u64) -> String {
     )
 }
 
+/// `why` says what the run waits for: the account's limit or a free slot.
+pub fn still_waiting(record: &RunRecord, why: &str, waited: u64) -> String {
+    format!(
+        "[brigade] run {id} is still waiting for the {account} account, {why}. Wait again with: brigade wait {id} \
+         --timeout {waited}\n",
+        id = record.id,
+        account = record.agent.account.name,
+    )
+}
+
 pub fn lost(record: &RunRecord, logs: &Path) -> String {
     format!(
         "[brigade] run {} stopped without a result; its worker process is gone\n{}[brigade] logs: {}\n",
@@ -193,12 +241,26 @@ pub fn state_json(record: &RunRecord, state: &State, logs: &Path, worktree: Opti
         State::Finished(Outcome::Failed { error }) => {
             json!({ "run": record, "status": "failed", "error": error, "logs": logs })
         }
-        State::Finished(Outcome::Limited { error }) => {
-            json!({ "run": record, "status": "limited", "error": error, "logs": logs })
-        }
+        State::Finished(Outcome::Limited {
+            error,
+            ran,
+            until,
+            retry_at,
+            model,
+        }) => json!({
+            "run": record,
+            "status": "limited",
+            "error": error,
+            "ran": ran,
+            "until": until,
+            "retry_at": retry_at,
+            "model": model,
+            "logs": logs,
+        }),
         State::Finished(Outcome::Cancelled { reason }) => {
             json!({ "run": record, "status": "cancelled", "reason": reason, "logs": logs })
         }
+        State::Waiting => json!({ "run": record, "status": "waiting" }),
         State::Running => json!({ "run": record, "status": "running" }),
         State::Lost => json!({ "run": record, "status": "lost", "logs": logs }),
     };
@@ -233,4 +295,98 @@ pub fn roster(entries: &[Entry], user_file: &Path) -> String {
         ));
     }
     out
+}
+
+pub fn capacity(accounts: &[AccountCapacity], now: u64) -> String {
+    let mut out = String::new();
+    for account in accounts {
+        let slots = match account.max_runs {
+            Some(max) => format!("{} of {max} runs going", account.running),
+            None => format!("{} running", account.running),
+        };
+        let state = match &account.limit {
+            Some(limit) => limited_until(limit),
+            None if !account.free => "full".to_string(),
+            None if account.agents.iter().all(|a| a.limit.is_some()) => "every model limited".to_string(),
+            None => "free".to_string(),
+        };
+        let names: Vec<&str> = account.agents.iter().map(|a| a.name.as_str()).collect();
+        out.push_str(&format!("{} ({}): {state}, {slots}", account.account, names.join(", ")));
+        if account.waiting > 0 {
+            out.push_str(&format!(", {} waiting", account.waiting));
+        }
+        out.push('\n');
+        if let Some(limit) = &account.limit {
+            out.push_str(&format!("  {}\n", limit.message));
+        }
+        for agent in &account.agents {
+            if let Some(limit) = &agent.limit {
+                out.push_str(&format!(
+                    "  {} ({}): {}: {}\n",
+                    agent.name,
+                    agent.model,
+                    limited_until(limit),
+                    limit.message
+                ));
+            }
+        }
+        if let Some(usage) = &account.usage {
+            let window = usage.window.as_deref().unwrap_or("usage");
+            let used = usage
+                .utilization
+                .map(|u| format!("{:.0}% used", u * 100.0))
+                .unwrap_or_else(|| usage.status.clone());
+            let resets = usage
+                .resets_at
+                .map(|r| format!(", resets {}", local_time(r)))
+                .unwrap_or_default();
+            let age = now.saturating_sub(usage.at) / 60;
+            out.push_str(&format!("  {window} window {used}{resets} (as of {age} min ago)\n"));
+        }
+    }
+    out
+}
+
+fn limited_until(limit: &Limit) -> String {
+    match limit.until {
+        Some(until) => format!("limited until {}", local_time(until)),
+        None => format!("limited, tried again after {}", local_time(limit.retry_at)),
+    }
+}
+
+pub fn runs(runs: &[Run], now: u64) -> String {
+    let mut out = String::new();
+    for run in runs {
+        let record = &run.record;
+        out.push_str(&format!(
+            "{}  {}  {}  {}  {}\n",
+            record.id,
+            record.agent.name,
+            record.agent.account.name,
+            state_name(&run.state),
+            age(now.saturating_sub(record.started_at)),
+        ));
+    }
+    out
+}
+
+pub fn state_name(state: &State) -> &'static str {
+    match state {
+        State::Finished(Outcome::Done { .. }) => "done",
+        State::Finished(Outcome::Failed { .. }) => "failed",
+        State::Finished(Outcome::Limited { .. }) => "limited",
+        State::Finished(Outcome::Cancelled { .. }) => "cancelled",
+        State::Waiting => "waiting",
+        State::Running => "running",
+        State::Lost => "lost",
+    }
+}
+
+fn age(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s ago"),
+        60..3600 => format!("{}m ago", secs / 60),
+        3600..86400 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86400),
+    }
 }

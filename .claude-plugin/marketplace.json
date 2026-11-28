@@ -10,7 +10,7 @@
       "description": "Tag in named agents (sol, neon, opus...) that each run in their own CLI (Claude Code, Codex or Antigravity), singly or as a team, from any of the three",
       "name": "brigade",
       "source": "./plugin",
-      "version": "0.5.0"
+      "version": "0.6.0"
     }
   ]
 }

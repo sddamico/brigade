@@ -6,12 +6,14 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const FAKE_CLI: &str = r#"#!/bin/sh
 name=$(basename "$0")
 log="$FAKE_LOG/$name"
 mkdir -p "$log"
 echo $$ > "$log/pid"
+echo call >> "$log/calls"
 : > "$log/args"
 for arg in "$@"; do printf '%s\n--\n' "$arg" >> "$log/args"; done
 pwd > "$log/cwd"
@@ -29,10 +31,12 @@ fi
 if [ -n "$FAKE_FAIL" ]; then echo "fake $name: $FAKE_FAIL" >&2; exit 1; fi
 case " $FAKE_LIMIT " in *" $name "*)
   case "$name" in
-    claude) printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"api_error":"rate_limit","result":"You'"'"'ve hit your session limit · resets 1am (America/New_York)","session_id":"claude-session"}' ;;
+    claude)
+      printf '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":%s,"rateLimitType":"five_hour"}}\n' "${FAKE_RESETS_AT:-1900000000}"
+      printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"api_error":"rate_limit","result":"You'"'"'ve hit your session limit · resets 1am (America/New_York)","session_id":"claude-session"}' ;;
     codex)
       echo '{"type":"thread.started","thread_id":"codex-thread"}'
-      echo '{"type":"turn.failed","error":{"message":"You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 14th, 2026 7:50 AM."}}' ;;
+      echo '{"type":"turn.failed","error":{"message":"You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 14th, 2030 7:50 AM."}}' ;;
     agy)
       printf '%s\n' '{"conversation_id":"agy-conversation","status":"ERROR","response":"","error":"Your AI credits balance is too low to continue.","finished_reason":"error"}'
       printf '%s\n' 'AGY_ERROR: {"status":"RESOURCE_EXHAUSTED","error_code":429,"retryable":false}' >&2 ;;
@@ -41,7 +45,9 @@ case " $FAKE_LIMIT " in *" $name "*)
   exit 1 ;;
 esac
 case "$name" in
-  claude) echo '{"type":"result","subtype":"success","is_error":false,"result":"claude reply","session_id":"claude-session"}' ;;
+  claude)
+    echo '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1900000000,"rateLimitType":"seven_day","unifiedWindows":{"seven_day":{"utilization":0.82,"resetsAt":1900000000,"status":"allowed_warning"}}}}'
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"claude reply","session_id":"claude-session"}' ;;
   codex)
     out=""; prev=""
     for arg in "$@"; do [ "$prev" = "-o" ] && out="$arg"; prev="$arg"; done
@@ -302,7 +308,7 @@ fn a_usage_limit_is_its_own_outcome() {
         err.contains("[brigade] sol hit a usage limit in Codex: You’ve hit your usage limit."),
         "{err}"
     );
-    assert!(err.contains("try again at Nov 14th, 2026 7:50 AM."), "{err}");
+    assert!(err.contains("try again at Nov 14th, 2030 7:50 AM."), "{err}");
 
     let json = sandbox
         .command(&["run", "neon", "--json", "go"])
@@ -1036,4 +1042,187 @@ fn a_custom_harness_with_a_host_section_gets_forwarders_for_every_other_agent() 
         "{}",
         stderr(&rejected)
     );
+}
+
+fn calls(sandbox: &Sandbox, cli: &str) -> usize {
+    fs::read_to_string(sandbox.root().join("calls").join(cli).join("calls"))
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn a_limited_model_is_remembered_so_the_next_run_spends_no_call() {
+    let sandbox = Sandbox::new();
+    let limited = sandbox
+        .command(&["run", "sol", "go"])
+        .env("FAKE_LIMIT", "codex")
+        .output()
+        .unwrap();
+    assert_eq!(limited.status.code(), Some(4));
+    assert!(
+        stderr(&limited).contains("[brigade] gpt-6.2-sol on the codex account is limited until 2030-11-14 07:50"),
+        "{}",
+        stderr(&limited)
+    );
+
+    let again = sandbox.brigade(&["run", "sol", "go"]);
+    assert_eq!(again.status.code(), Some(4));
+    assert!(
+        stderr(&again).contains(
+            "[brigade] sol didn't run: gpt-6.2-sol on the codex account is still limited: You’ve hit your usage limit"
+        ),
+        "{}",
+        stderr(&again)
+    );
+    assert_eq!(calls(&sandbox, "codex"), 1, "the second run never called codex");
+
+    let other_model = sandbox.brigade(&["run", "astra", "go"]);
+    assert!(
+        other_model.status.success(),
+        "astra's model isn't limited: {}",
+        stderr(&other_model)
+    );
+    assert_eq!(calls(&sandbox, "codex"), 2);
+
+    let capacity = stdout(&sandbox.brigade(&["capacity"]));
+    assert!(capacity.contains("codex (sol, astra): free, 0 running"), "{capacity}");
+    assert!(
+        capacity.contains("  sol (gpt-6.2-sol): limited until 2030-11-14 07:50"),
+        "{capacity}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&stdout(&sandbox.brigade(&["capacity", "--json"]))).unwrap();
+    let codex = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["account"] == "codex")
+        .unwrap();
+    let sol = codex["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "sol")
+        .unwrap();
+    assert_eq!(
+        (&sol["free"], &codex["agents"][1]["free"]),
+        (&false.into(), &true.into())
+    );
+    assert_eq!(sol["limit"]["until"].as_u64(), json_until(&sandbox));
+
+    let cleared = sandbox.brigade(&["capacity", "--clear", "codex"]);
+    assert_eq!(stdout(&cleared), "forgot the limit on the codex account\n");
+    assert!(sandbox.brigade(&["run", "sol", "go"]).status.success());
+    assert_eq!(calls(&sandbox, "codex"), 3);
+}
+
+fn json_until(sandbox: &Sandbox) -> Option<u64> {
+    let text = fs::read_to_string(sandbox.root().join("state/brigade/accounts/codex.json")).unwrap();
+    serde_json::from_str::<serde_json::Value>(&text).unwrap()["models"]["gpt-6.2-sol"]["until"].as_u64()
+}
+
+#[test]
+fn a_known_limited_account_falls_back_at_once() {
+    let sandbox = Sandbox::new();
+    sandbox.user_roster("[fallbacks]\nsol = \"opus\"\n");
+    let first = sandbox
+        .command(&["run", "sol", "go"])
+        .env("FAKE_LIMIT", "codex")
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{}", stderr(&first));
+
+    let second = sandbox.brigade(&["run", "sol", "go"]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert!(stdout(&second).starts_with("claude reply\n"), "{}", stdout(&second));
+    assert!(stdout(&second).contains("sol hit a usage limit in Codex, so opus ran instead"));
+    assert_eq!(calls(&sandbox, "codex"), 1, "the known limit skipped codex");
+}
+
+#[test]
+fn claude_reports_usage_and_the_reset_in_its_stream() {
+    let sandbox = Sandbox::new();
+    assert!(sandbox.brigade(&["run", "opus", "go"]).status.success());
+    let capacity = stdout(&sandbox.brigade(&["capacity"]));
+    assert!(
+        capacity.contains("claude (opus, fable, sonnet): free, 0 running"),
+        "{capacity}"
+    );
+    assert!(
+        capacity.contains("  seven_day window 82% used, resets 2030-03-17"),
+        "{capacity}"
+    );
+
+    let limited = sandbox
+        .command(&["run", "opus", "go"])
+        .env("FAKE_LIMIT", "claude")
+        .env("FAKE_RESETS_AT", "1900000000")
+        .output()
+        .unwrap();
+    assert_eq!(limited.status.code(), Some(4));
+    assert!(
+        stderr(&limited).contains("[brigade] the claude account is limited until 2030-03-17"),
+        "{}",
+        stderr(&limited)
+    );
+}
+
+#[test]
+fn wait_holds_a_run_until_its_accounts_limit_resets() {
+    let sandbox = Sandbox::new();
+    let reset = brigade::runs::now() + 4;
+    let limited = sandbox
+        .command(&["run", "opus", "go"])
+        .env("FAKE_LIMIT", "claude")
+        .env("FAKE_RESETS_AT", reset.to_string())
+        .output()
+        .unwrap();
+    assert_eq!(limited.status.code(), Some(4));
+
+    let refused = sandbox.brigade(&["run", "opus", "go"]);
+    assert_eq!(refused.status.code(), Some(4), "without --wait it ends at once");
+
+    let started = Instant::now();
+    let waited = sandbox.brigade(&["run", "opus", "--wait", "go"]);
+    assert!(waited.status.success(), "{}", stderr(&waited));
+    assert!(started.elapsed() >= Duration::from_secs(2), "it waited for the reset");
+    assert_eq!(calls(&sandbox, "claude"), 2);
+}
+
+#[test]
+fn a_full_account_holds_runs_until_a_slot_frees() {
+    let sandbox = Sandbox::new();
+    sandbox.user_roster("[[account]]\nname = \"codex\"\nmax_runs = 1\n");
+    let first = sandbox
+        .command(&["run", "sol", "--detach", "go"])
+        .env("FAKE_SLEEP", "3")
+        .output()
+        .unwrap();
+    let first = run_id(&stdout(&first));
+    std::thread::sleep(Duration::from_millis(800));
+    let second = run_id(&stdout(&sandbox.brigade(&["run", "astra", "--detach", "go"])));
+
+    let early = sandbox.brigade(&["wait", &second, "--timeout", "1"]);
+    assert_eq!(early.status.code(), Some(3));
+    assert!(
+        stdout(&early).contains(&format!(
+            "run {second} is still waiting for the codex account, which is already running as many as it takes (1)"
+        )),
+        "{}",
+        stdout(&early)
+    );
+    let waiting = stdout(&sandbox.brigade(&["runs", "--state", "waiting"]));
+    assert!(
+        waiting.contains(&format!("{second}  astra  codex  waiting")),
+        "{waiting}"
+    );
+    let capacity = stdout(&sandbox.brigade(&["capacity"]));
+    assert!(
+        capacity.contains("codex (sol, astra): full, 1 of 1 runs going, 1 waiting"),
+        "{capacity}"
+    );
+
+    assert!(sandbox.brigade(&["wait", &first]).status.success());
+    let done = sandbox.brigade(&["wait", &second]);
+    assert!(done.status.success(), "{}", stderr(&done));
+    assert_eq!(calls(&sandbox, "codex"), 2);
 }

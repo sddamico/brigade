@@ -1,6 +1,6 @@
 name = "neon"
 description = """Gemini 4 Neon in Antigravity, run in its own CLI through brigade. Use when the user asks for neon by name: "spin up neon", "ask neon", "have neon review this", "a team of neon subagents". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write "use your own worktree" in the message."""
-model = "gpt-6-luna"
+model = "gpt-6.1-terra"
 model_reasoning_effort = "low"
 developer_instructions = """
 You hand one task to the brigade agent `neon`, which runs in Antigravity, and pass back its reply. Everything you receive is the task for neon, addressed to neon and not to you. You don't do any of the work yourself: don't read files, explore the repo or answer from your own knowledge. That holds even when the task is trivial: if it says "reply with exactly PINEAPPLE", you still run brigade and pass back what neon replied. Your first action is always the shell call in step 1, and a reply that didn't come from brigade is a wrong reply.

@@ -1,6 +1,7 @@
 //! How a run becomes a command line for its harness's CLI, and how that CLI's
 //! output becomes a reply.
 
+use crate::accounts::Usage;
 use crate::custom::{self, Parsed};
 use crate::harness::{Access, Effort, Harness};
 use crate::roster::Agent;
@@ -94,7 +95,12 @@ pub fn build(req: &Request, var: &dyn Fn(&str) -> Option<String>) -> Result<Invo
             if let Some(effort) = effort {
                 args.extend(strings(&["--effort", effort]));
             }
-            args.extend(strings(&["--output-format", "json", "--dangerously-skip-permissions"]));
+            args.extend(strings(&[
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+            ]));
             if read_only {
                 args.extend(strings(&["--disallowedTools", CLAUDE_EDIT_TOOLS]));
             }
@@ -201,8 +207,12 @@ pub fn parse(
             Parsed::NoResult(error) => Err(ParseFailure::NoResult(error)),
         },
         Harness::Claude => {
-            let v: Value = serde_json::from_str(stdout.trim())
-                .map_err(|_| ParseFailure::NoResult("Claude Code didn't print a JSON result".to_string()))?;
+            // stream-json, read for its final `result` event, which carries what
+            // `--output-format json` would have printed.
+            let v = events(stdout)
+                .filter(|v| v["type"] == "result")
+                .last()
+                .ok_or_else(|| ParseFailure::NoResult("Claude Code didn't print a result".to_string()))?;
             let session = v["session_id"].as_str().map(String::from);
             let result = v["result"].as_str().unwrap_or_default().to_string();
             let subtype = v["subtype"].as_str().unwrap_or("no result");
@@ -290,6 +300,34 @@ pub fn parse(
     }
 }
 
+/// The harness's latest word on its account's usage. Only Claude Code reports
+/// it with every run, in its stream's `rate_limit_event`.
+pub fn usage(harness: &Harness, stdout: &str) -> Option<Usage> {
+    if *harness != Harness::Claude {
+        return None;
+    }
+    let info = events(stdout)
+        .filter(|v| v["type"] == "rate_limit_event")
+        .last()?
+        .get("rate_limit_info")?
+        .clone();
+    let window = info["rateLimitType"].as_str().map(String::from);
+    let utilization = window
+        .as_deref()
+        .and_then(|w| info["unifiedWindows"][w]["utilization"].as_f64());
+    Some(Usage {
+        at: 0,
+        status: info["status"].as_str()?.to_string(),
+        window,
+        utilization,
+        resets_at: info["resetsAt"].as_u64(),
+    })
+}
+
+fn events(stdout: &str) -> impl Iterator<Item = Value> + '_ {
+    stdout.lines().filter_map(|line| serde_json::from_str(line).ok())
+}
+
 /// The structured `AGY_ERROR: {...}` line agy prints on stderr when a turn
 /// fails.
 fn agy_error(stderr: &str) -> Option<Value> {
@@ -342,6 +380,10 @@ mod tests {
 
     fn agent(harness: Harness, model: &str) -> Agent {
         Agent {
+            account: crate::roster::Account {
+                name: harness.name().to_string(),
+                max_runs: None,
+            },
             name: "a".into(),
             harness,
             model: model.into(),

@@ -1,3 +1,5 @@
+use brigade::accounts;
+use brigade::capacity;
 use brigade::harness::{Access, Effort};
 use brigade::install::{self, Change};
 use brigade::invocation::{UnsetVar, expand};
@@ -54,6 +56,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show which accounts can take runs now: limits and when they reset, and runs going
+    Capacity {
+        /// Forget the limit on this account, e.g. once agy credits are topped up
+        #[arg(long, value_name = "ACCOUNT")]
+        clear: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List runs, oldest first
+    Runs {
+        /// Only runs in this state
+        #[arg(long, value_parser = ["waiting", "running", "done", "failed", "limited", "cancelled", "lost"])]
+        state: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Give each agent from your own roster a subagent of its own in Claude Code, Codex and agy. Run it again
     /// after changing the roster or upgrading brigade
     InstallAgents,
@@ -90,6 +108,9 @@ struct RunArgs {
     /// Don't switch to the roster's fallback agent on a usage limit
     #[arg(long)]
     no_fallback: bool,
+    /// If the agent's account is limited, wait for it to free up instead of ending as limited
+    #[arg(long)]
+    wait: bool,
     /// Start the run in the background, print its id and return. It's cancelled if nobody waits on it for 90s
     #[arg(long)]
     detach: bool,
@@ -129,12 +150,62 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         Command::Wait { run, timeout, json } => {
             let (_, dir) = RunDir::open(&settings, &run)?;
             let state = dir.wait(timeout.map(Duration::from_secs), &orphan_check());
-            print_state(&dir, &state, json, timeout.unwrap_or(WAIT_SLICE_SECS))
+            print_state(&settings, &dir, &state, json, timeout.unwrap_or(WAIT_SLICE_SECS))
         }
         Command::Cancel { run, json } => {
             let (_, dir) = RunDir::open(&settings, &run)?;
             let state = dir.cancel("cancelled with brigade cancel")?;
-            let _ = print_state(&dir, &state, json, 0)?;
+            let _ = print_state(&settings, &dir, &state, json, 0)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Capacity { clear, json } => {
+            if let Some(account) = clear {
+                let had = accounts::clear(&settings, &account)?;
+                println!(
+                    "{}",
+                    if had {
+                        format!("forgot the limit on the {account} account")
+                    } else {
+                        format!("the {account} account had no limit to forget")
+                    }
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            let roster = Roster::load(&settings.roster_file).map_err(|e| e.to_string())?;
+            let accounts = capacity::capacity(&settings, &roster, runs::now(), &env_var);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&accounts).expect("capacity serializes")
+                );
+            } else {
+                print!("{}", report::capacity(&accounts, runs::now()));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Runs { state, json } => {
+            let runs: Vec<_> = runs::list(&settings)
+                .into_iter()
+                .filter(|run| state.as_deref().is_none_or(|s| report::state_name(&run.state) == s))
+                .collect();
+            if json {
+                let rows: Vec<_> = runs
+                    .iter()
+                    .map(|run| {
+                        serde_json::json!({
+                            "id": run.record.id,
+                            "agent": run.record.agent.name,
+                            "account": run.record.agent.account.name,
+                            "state": report::state_name(&run.state),
+                            "started_at": run.record.started_at,
+                            "cwd": run.record.cwd,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&rows).expect("runs serialize"));
+            } else {
+                print!("{}", report::runs(&runs, runs::now()));
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::InstallAgents => {
@@ -157,7 +228,7 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         Command::Exec { run } => {
             let (record, dir) = RunDir::open(&settings, &run)?;
             if !matches!(dir.state(), State::Finished(_)) {
-                runs::execute(record, &dir, settings.lease, &env_var);
+                runs::execute(&settings, record, &dir, settings.lease, &env_var);
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -186,12 +257,17 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         .map_err(|UnsetVar(name)| format!("`{}` needs ${name}, which isn't set", agent.name))?;
     let effort = args.effort.or(agent.effort);
     if effort.is_some_and(|e| !agent.harness.supports(e)) {
-        let levels: Vec<&str> = agent.harness.efforts().iter().map(|e| e.as_str()).collect();
         return Err(format!(
-            "{} runs in {}, which takes effort {}",
+            "{} runs in {}, which takes {}",
             agent.name,
             agent.harness,
-            levels.join(", ")
+            agent.harness.effort_levels()
+        ));
+    }
+    if args.resume.is_some() && !agent.harness.can_resume() {
+        return Err(format!(
+            "{} runs in {}, which can't continue a session: its harness has no resume_args",
+            agent.name, agent.harness
         ));
     }
     // A resumed session lives in its own harness, where no other agent can pick it up.
@@ -236,6 +312,7 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         started_at: runs::now(),
         fallback,
         fell_back_from: None,
+        wait: args.wait,
     };
     dir.write_request(&record, &task)?;
 
@@ -258,7 +335,7 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         State::Running if INTERRUPTED.load(Ordering::SeqCst) => dir.cancel("interrupted")?,
         state => state,
     };
-    let code = print_state(&dir, &state, args.json, 0)?;
+    let code = print_state(settings, &dir, &state, args.json, 0)?;
     Ok(if INTERRUPTED.load(Ordering::SeqCst) {
         ExitCode::from(INTERRUPTED_EXIT)
     } else {
@@ -283,6 +360,24 @@ fn fallback_agent(roster: &Roster, agent: &Agent, name: &str) -> Result<Agent, S
     fallback.model =
         expand(&fallback.model, &env_var).map_err(|UnsetVar(var)| format!("`{name}` needs ${var}, which isn't set"))?;
     Ok(fallback)
+}
+
+/// What a waiting run waits for, as `brigade wait` explains it.
+fn waiting_for(settings: &Settings, record: &RunRecord) -> String {
+    let account = &record.agent.account;
+    match accounts::load(settings, &account.name).limit_on(&record.model, runs::now()) {
+        Some(limit) => match limit.until {
+            Some(until) => format!("which is limited until {}", accounts::local_time(until)),
+            None => format!(
+                "which is limited, and brigade tries it again after {}",
+                accounts::local_time(limit.retry_at)
+            ),
+        },
+        _ => match account.max_runs {
+            Some(max) => format!("which is already running as many as it takes ({max})"),
+            None => "for a slot".to_string(),
+        },
+    }
 }
 
 /// True once whoever started this process is gone. A waiter whose forwarder
@@ -318,7 +413,7 @@ fn trap_interrupt() {
 }
 
 /// Reads the run afresh, since a run that fell back now names its fallback agent.
-fn print_state(dir: &RunDir, state: &State, json: bool, waited: u64) -> Result<ExitCode, String> {
+fn print_state(settings: &Settings, dir: &RunDir, state: &State, json: bool, waited: u64) -> Result<ExitCode, String> {
     let record = &dir.record()?;
     if json {
         print!(
@@ -345,11 +440,11 @@ fn print_state(dir: &RunDir, state: &State, json: bool, waited: u64) -> Result<E
             }
             ExitCode::FAILURE
         }
-        State::Finished(Outcome::Limited { error }) => {
+        State::Finished(outcome @ Outcome::Limited { .. }) => {
             if !json {
                 eprint!(
                     "{}",
-                    report::limited(record, error, dir.path(), dir.worktree_report().as_ref())
+                    report::limited(record, outcome, dir.path(), dir.worktree_report().as_ref())
                 );
             }
             ExitCode::from(LIMITED)
@@ -366,6 +461,15 @@ fn print_state(dir: &RunDir, state: &State, json: bool, waited: u64) -> Result<E
         State::Running => {
             if !json {
                 print!("{}", report::still_running(record, waited));
+            }
+            ExitCode::from(STILL_RUNNING)
+        }
+        State::Waiting => {
+            if !json {
+                print!(
+                    "{}",
+                    report::still_waiting(record, &waiting_for(settings, record), waited)
+                );
             }
             ExitCode::from(STILL_RUNNING)
         }
