@@ -287,7 +287,12 @@ pub fn parse(
             if status != "SUCCESS" {
                 // The JSON's error is only a message ("Your AI credits balance is too
                 // low to continue."); agy's AGY_ERROR line on stderr has the status.
-                let limited = agy_error(stderr).is_some_and(|e| e["status"] == "RESOURCE_EXHAUSTED");
+                // agy's error JSON is only a message ("Your AI credits balance is
+                // too low to continue."), so the AGY_ERROR line on stderr carries
+                // the status; a transport error names it in the message instead.
+                let error_text = v["error"].as_str().unwrap_or_default();
+                let limited = agy_error(stderr).is_some_and(|e| e["status"] == "RESOURCE_EXHAUSTED")
+                    || AGY_LIMIT_SIGNS.iter().any(|sign| error_text.contains(sign));
                 return Err(match v["error"].as_str() {
                     Some(error) if limited => ParseFailure::Limited(error.to_string()),
                     Some(error) => ParseFailure::Reported(error.to_string()),
@@ -304,6 +309,14 @@ pub fn parse(
 /// it with every run, in its stream's `rate_limit_event`.
 /// The session the harness reported, whether or not the run succeeded, so a
 /// failed or limited run's conversation can still be found.
+/// How agy's error message says a usage limit was hit when no AGY_ERROR line
+/// came with it.
+const AGY_LIMIT_SIGNS: [&str; 3] = [
+    "RESOURCE_EXHAUSTED",
+    "Resource has been exhausted",
+    "exhausted your quota",
+];
+
 pub fn session(harness: &Harness, stdout: &str) -> Option<String> {
     match harness {
         Harness::Custom(custom) => custom::session(custom, stdout),

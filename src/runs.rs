@@ -696,11 +696,10 @@ fn run_harness_once(
     if let Some(arg) = invocation.args.iter().find(|a| a.len() >= MAX_ARG_BYTES) {
         return Outcome::Failed {
             error: format!(
-                "`{}` takes the task as a command-line argument, and this one is {} KiB, over the system's \
-                 {} KiB limit for one; put the long part in a file and point the task at it",
+                "`{}` takes the task as a command-line argument, and this one is {} bytes, where the system \
+                 takes fewer than {MAX_ARG_BYTES}; put the long part in a file and point the task at it",
                 invocation.program,
-                arg.len() / 1024,
-                MAX_ARG_BYTES / 1024
+                arg.len(),
             ),
         };
     }
@@ -871,7 +870,7 @@ fn note_account(settings: &Settings, record: &RunRecord, outcome: Outcome, usage
             // A reset already past, as from a clock or time zone that differs
             // from the harness's, is no reset time at all.
             let until = rejected_until
-                .or_else(|| accounts::reset_in_message(&error))
+                .or_else(|| accounts::reset_in_message(&error, now))
                 .or_else(|| claude_reset_in(record, &error, now))
                 .filter(|until| *until > now);
             let _ = accounts::record_limit(settings, account, model, &error, until, now);
@@ -903,30 +902,58 @@ fn claude_reset_in(record: &RunRecord, error: &str, now: u64) -> Option<u64> {
     accounts::claude_reset(when, now)
 }
 
-/// The task's first line as the subject, cut at a word to fit 72 characters,
-/// so the branch's log says what each run did.
+/// The task's first line as the subject, so the branch's log says what each
+/// run did.
 fn commit_message(record: &RunRecord, task: &str) -> String {
-    let line = task.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-    let subject = if line.chars().count() <= 72 {
-        line.to_string()
-    } else {
-        let cut: String = line.chars().take(71).collect();
-        let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head).to_string();
-        format!("{cut}…")
-    };
     format!(
-        "{subject}\n\nbrigade run {}: {} on the {} account\n",
-        record.id, record.agent.name, record.agent.account.name
+        "{}\n\nbrigade run {}: {} on the {} account\n",
+        subject(task),
+        record.id,
+        record.agent.name,
+        record.agent.account.name
     )
 }
 
+/// The task's first line of words (not a code fence or a rule), cut at a word
+/// to fit 72 characters.
+fn subject(task: &str) -> String {
+    let line = task
+        .lines()
+        .find(|l| l.chars().any(char::is_alphanumeric))
+        .unwrap_or("")
+        .trim();
+    if line.chars().count() <= 72 {
+        line.to_string()
+    } else {
+        let cut: String = line.chars().take(71).collect();
+        let whole_word = line.chars().nth(71) == Some(' ');
+        let cut = match cut.rsplit_once(' ') {
+            Some((head, _)) if !whole_word => head,
+            _ => cut.as_str(),
+        };
+        format!("{}…", cut.trim_end())
+    }
+}
+
 /// Deletes finished runs started longer ago than `keep`, and returns how many.
+/// A run's worktree goes with it if it's still clean at its starting commit:
+/// it was only kept so the run's session could be continued there.
 pub fn prune(settings: &Settings, keep: Duration) -> usize {
     let cutoff = now().saturating_sub(keep.as_secs());
     list(settings)
         .into_iter()
         .filter(|run| matches!(run.state, State::Finished(_)) && run.record.started_at <= cutoff)
-        .filter(|run| fs::remove_dir_all(run.dir.path()).is_ok())
+        .filter(|run| {
+            if let Some(worktree) = run
+                .record
+                .worktree
+                .as_ref()
+                .filter(|_| run.record.access == Access::Write)
+            {
+                worktree::tidy(worktree);
+            }
+            fs::remove_dir_all(run.dir.path()).is_ok()
+        })
         .count()
 }
 
@@ -979,4 +1006,21 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
 fn tail_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.trim_end().lines().collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::subject;
+
+    #[test]
+    fn a_commit_subject_is_the_tasks_first_line_of_words_cut_at_a_word() {
+        assert_eq!(subject("\n\n  Fix the parser\nmore"), "Fix the parser");
+        assert_eq!(subject("```\nfn main() {}\n```"), "fn main() {}");
+        let words = format!("{} yyyy zzzz more", "x".repeat(66));
+        assert_eq!(subject(&words), format!("{} yyyy…", "x".repeat(66)));
+        let split = format!("{} yyyyyy zzzz", "x".repeat(66));
+        assert_eq!(subject(&split), format!("{}…", "x".repeat(66)));
+        assert_eq!(subject(&"x".repeat(100)), format!("{}…", "x".repeat(71)));
+        assert_eq!(subject(&"x".repeat(72)), "x".repeat(72));
+    }
 }

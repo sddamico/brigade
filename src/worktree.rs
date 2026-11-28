@@ -82,7 +82,11 @@ pub fn create(settings: &Settings, cwd: &Path, run_id: &str) -> Result<(Worktree
     let path = settings.worktrees_dir().join(name).join(run_id);
     let branch = format!("brigade/{run_id}");
     let path_arg = path.to_string_lossy();
-    git(&root, &["worktree", "add", "--quiet", "-b", &branch, &path_arg, "HEAD"])?;
+    if let Err(error) = git(&root, &["worktree", "add", "--quiet", "-b", &branch, &path_arg, "HEAD"]) {
+        // `worktree add -b` makes the branch before it makes the directory.
+        let _ = git(&root, &["branch", "--quiet", "-D", &branch]);
+        return Err(error);
+    }
     let base = git(&path, &["rev-parse", "HEAD"])?.trim().to_string();
     // `git rev-parse --show-prefix` is empty at the repo root, and joining it
     // would leave a trailing slash in the paths brigade prints.

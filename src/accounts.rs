@@ -353,30 +353,46 @@ fn state_file(settings: &Settings, account: &str) -> PathBuf {
 
 /// Codex says when a limit resets only in its message: "… or try again at Nov
 /// 27th, 2026 12:09 AM." That's local time.
-pub fn reset_in_message(message: &str) -> Option<u64> {
+/// Codex's "try again at Nov 28th, 2026 1:26 AM.", in local time. A reset
+/// later the same day comes without the date ("try again at 1:26 AM."), which
+/// is the next time that clock time comes round after `now`.
+pub fn reset_in_message(message: &str, now: u64) -> Option<u64> {
     let at = message.split("try again at ").nth(1)?;
     let words: Vec<&str> = at.split_whitespace().take(5).collect();
+    if let [clock, meridiem, ..] = words.as_slice()
+        && let Some((hour, minute)) = clock_time(clock, meridiem)
+    {
+        let (year, month, day) = local_date(now);
+        let today = local_epoch(year, month, day, hour, minute)?;
+        return if today > now {
+            Some(today)
+        } else {
+            local_epoch(year, month, day + 1, hour, minute)
+        };
+    }
     let [month, day, year, clock, meridiem] = words.as_slice() else {
         return None;
     };
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let month = MONTHS.iter().position(|m| month.starts_with(m))?;
+    let month = month_index(month)?;
     let day: i32 = day
         .trim_end_matches(',')
         .trim_end_matches(|c: char| c.is_alphabetic())
         .parse()
         .ok()?;
     let year: i32 = year.parse().ok()?;
+    let (hour, minute) = clock_time(clock, meridiem)?;
+    local_epoch(year, month, day, hour, minute)
+}
+
+/// "1:26" and "AM." as a 24-hour (hour, minute).
+fn clock_time(clock: &str, meridiem: &str) -> Option<(i32, i32)> {
     let (hour, minute) = clock.split_once(':')?;
     let (hour, minute): (i32, i32) = (hour.parse().ok()?, minute.parse().ok()?);
-    let hour = match meridiem.trim_end_matches('.') {
-        "AM" => hour % 12,
-        "PM" => hour % 12 + 12,
-        _ => return None,
-    };
-    local_epoch(year, month as i32, day, hour, minute)
+    match meridiem.trim_end_matches('.') {
+        "AM" => Some((hour % 12, minute)),
+        "PM" => Some((hour % 12 + 12, minute)),
+        _ => None,
+    }
 }
 
 /// When a Claude Code `/usage` window resets: "Dec 2, 2am (America/New_York)",
@@ -499,11 +515,20 @@ mod tests {
     #[test]
     fn reads_codexs_reset_time_as_local_time() {
         let message = "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 27th, 2026 12:09 AM.";
-        let at = reset_in_message(message).unwrap();
+        let now = local_epoch_for_tests(2026, 10, 26, 23, 0);
+        let at = reset_in_message(message, now).unwrap();
         assert_eq!(local_time(at)[..16], *"2026-11-27 00:09");
-        let pm = reset_in_message("try again at Mar 3rd, 2027 1:05 PM.").unwrap();
+        let pm = reset_in_message("try again at Mar 3rd, 2027 1:05 PM.", now).unwrap();
         assert_eq!(local_time(pm)[..16], *"2027-03-03 13:05");
-        assert_eq!(reset_in_message("You've hit your session limit · resets 1am"), None);
+        assert_eq!(
+            reset_in_message("You've hit your session limit · resets 1am", now),
+            None
+        );
+        // Later the same day, Codex leaves the date out.
+        let later = reset_in_message("purchase more credits or try again at 11:40 PM.", now).unwrap();
+        assert_eq!(local_time(later)[..16], *"2026-11-26 23:40");
+        let tomorrow = reset_in_message("or try again at 1:26 AM.", now).unwrap();
+        assert_eq!(local_time(tomorrow)[..16], *"2026-11-27 01:26");
     }
 
     #[test]

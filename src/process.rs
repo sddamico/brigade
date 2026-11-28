@@ -137,6 +137,18 @@ struct Row {
     start: String,
 }
 
+/// Whether this process is inside Codex's Linux sandbox, which runs each
+/// command in a pid namespace of its own with `codex-linux-sandbox` as its
+/// process 1. Everything in the namespace ends with that command. A command the
+/// user approved to run unsandboxed isn't in one, though Codex still sets its
+/// sandbox variables for it.
+pub fn in_codex_linux_sandbox() -> bool {
+    std::fs::read("/proc/1/cmdline").is_ok_and(|cmdline| {
+        let program = cmdline.split(|&b| b == 0).next().unwrap_or_default();
+        program.rsplit(|&b| b == b'/').next() == Some(b"codex-linux-sandbox".as_slice())
+    })
+}
+
 fn process_table() -> Vec<Row> {
     let Ok(output) = Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,pgid=,lstart="])

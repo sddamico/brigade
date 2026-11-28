@@ -36,9 +36,9 @@ Runs are read-only unless asked to write, and use the agent's model at the harne
 The CLI, with cargo or mise:
 
 ```sh
-cargo install --git https://github.com/sddamico/brigade --tag v0.9.2
+cargo install --git https://github.com/sddamico/brigade --tag v0.9.3
 # or, in ~/.config/mise/config.toml:
-# "cargo:https://github.com/sddamico/brigade" = "tag:v0.9.2"
+# "cargo:https://github.com/sddamico/brigade" = "tag:v0.9.3"
 ```
 
 The plugin, from this repo's marketplace:
@@ -50,13 +50,13 @@ claude plugin install brigade@brigade
 codex plugin marketplace add https://github.com/sddamico/brigade.git
 codex plugin add brigade@brigade
 
-agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.9.2
+agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.9.3
 ```
 
 Codex plugins can't ship subagent roles, so link the roles from Codex's copy of the plugin into `~/.codex/agents`, which Codex searches recursively. Re-point it after a plugin update:
 
 ```sh
-ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.9.2/codex/agents ~/.codex/agents/brigade
+ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.9.3/codex/agents ~/.codex/agents/brigade
 ```
 
 Each agent needs its harness's CLI installed and logged in.
@@ -89,7 +89,7 @@ Every run belongs to whoever waits on it. `brigade wait` and a foreground `briga
 
 A run's directory under `$XDG_STATE_HOME/brigade/runs` (`~/.local/state/brigade/runs`) holds its task and the harness's whole output, readable only by you. Finished runs are deleted after a week; `brigade runs --prune` deletes them all now.
 
-A write run in a worktree commits its changes with the task's first line as the subject. A read-only run never commits, even inside a worktree.
+A write run in a worktree commits its changes with the task's first line as the subject. A read-only run never commits, even inside a worktree. A run that changed nothing keeps its worktree, so its session can be continued there, until the run is deleted.
 
 brigade can't start a run from inside a host's sandbox, since the agent's CLI needs the network and its own config. Its forwarders ask to run outside it: with `BypassSandbox` in agy, and with `sandbox_permissions: "require_escalated"` in Codex, which asks you to approve it unless your approval settings already allow `brigade`.
 

@@ -31,7 +31,7 @@ pub fn done(record: &RunRecord, session: Option<&str>, message: &str, worktree: 
         // A resumed session keeps whatever this run chose over the roster.
         let mut choices = String::new();
         if record.model != agent.model {
-            choices.push_str(&format!(" --model {}", record.model));
+            choices.push_str(&format!(" --model {}", shell_quote(&record.model)));
         }
         if let Some(effort) = record.effort.filter(|_| record.effort != agent.effort) {
             choices.push_str(&format!(" --effort {effort}"));
@@ -40,9 +40,10 @@ pub fn done(record: &RunRecord, session: Option<&str>, message: &str, worktree: 
             choices.push_str(" --write");
         }
         out.push_str(&format!(
-            "[brigade] continue it with: brigade run {} --account {} --resume {session} --cwd {}{choices}\n",
-            agent.name,
-            agent.account.name,
+            "[brigade] continue it with: brigade run {} --account {} --resume {} --cwd {}{choices}\n",
+            shell_quote(&agent.name),
+            shell_quote(&agent.account.name),
+            shell_quote(session),
             shell_quote(&record.cwd.to_string_lossy()),
         ));
     }
@@ -64,12 +65,13 @@ pub fn failed(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&Wo
 /// The session a run that didn't finish left behind, so it can be resumed or
 /// deleted.
 fn harness_session(record: &RunRecord) -> String {
-    match &record.harness_session {
-        Some(session) => format!(
-            "[brigade] its {} session is {session}\n",
-            record.agent.harness.product()
-        ),
-        None => String::new(),
+    let product = record.agent.harness.product();
+    match (&record.harness_session, &record.resume) {
+        (Some(session), Some(asked)) if session != asked => {
+            format!("[brigade] its {product} session is {session}, a new one, not {asked} as asked\n")
+        }
+        (Some(session), _) => format!("[brigade] its {product} session is {session}\n"),
+        (None, _) => String::new(),
     }
 }
 
@@ -222,7 +224,7 @@ fn worktree_lines(record: &RunRecord, report: Option<&WorktreeReport>) -> String
             format!("[brigade] it changed nothing; its worktree {path} is on branch {branch}\n")
         }
         Some(WorktreeState::Uncommitted { error }) => format!(
-            "[brigade] its changes are uncommitted in worktree {path} on branch {branch}, because committing failed: {error}\n"
+            "[brigade] its changes are uncommitted in worktree {path} on branch {branch}, because {error}\n"
         ),
         Some(WorktreeState::Removed) => {
             format!("[brigade] it left no changes, so its worktree and branch {branch} were removed\n")
@@ -459,7 +461,11 @@ pub fn capacity(accounts: &[AccountCapacity], now: u64) -> String {
             None => "free".to_string(),
         };
         let names: Vec<&str> = account.agents.iter().map(|a| a.name.as_str()).collect();
-        out.push_str(&format!("{} ({}): {state}, {slots}", account.account, names.join(", ")));
+        let agents = match names.as_slice() {
+            [] => String::new(),
+            names => format!(" ({})", names.join(", ")),
+        };
+        out.push_str(&format!("{}{agents}: {state}, {slots}", account.account));
         if !account.serving.is_empty() {
             out.push_str(&format!(", serving {}", account.serving.join(", ")));
         }

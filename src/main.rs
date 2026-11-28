@@ -136,8 +136,8 @@ struct RunArgs {
     #[arg(long)]
     json: bool,
     /// The task; read from stdin when omitted or `-`. Everything after the agent's options is the task, so
-    /// words in it like `--write` stay words
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    /// words in it like `--write` stay words. A task that starts with `-` goes after `--`
+    #[arg(trailing_var_arg = true)]
     task: Vec<String>,
 }
 
@@ -382,7 +382,13 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
             ));
         }
         for entry in fallback_routes {
-            routes.push(expanded(entry.agent.clone())?);
+            let route = expanded(entry.agent.clone()).map_err(|error| {
+                format!(
+                    "{error}; it's {}'s fallback, so --no-fallback runs without it",
+                    agent.name
+                )
+            })?;
+            routes.push(route);
         }
     }
     let task = read_task(&args.task)?;
@@ -464,7 +470,12 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
 /// reported before anything starts and the record names the model the harness
 /// really gets.
 fn expanded(mut agent: Agent) -> Result<Agent, String> {
-    let unset = |UnsetVar(name)| format!("`{}` needs ${name}, which isn't set", agent.name);
+    let unset = |UnsetVar(name)| {
+        format!(
+            "`{}` on the {} account needs ${name}, which isn't set",
+            agent.name, agent.account.name
+        )
+    };
     for value in agent.env.values().chain(&agent.args) {
         expand(value, &env_var).map_err(unset)?;
     }

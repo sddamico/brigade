@@ -261,7 +261,7 @@ fn user_roster_agents_get_their_env_expanded() {
     let unset = sandbox.brigade(&["run", "lab-claude", "hello"]);
     assert!(!unset.status.success());
     assert!(
-        stderr(&unset).contains("`lab-claude` needs $LAB_SERVER, which isn't set"),
+        stderr(&unset).contains("`lab-claude` on the local account needs $LAB_SERVER, which isn't set"),
         "{}",
         stderr(&unset)
     );
@@ -1797,10 +1797,94 @@ fn a_run_inside_codexs_sandbox_is_refused_with_how_to_get_out() {
     let sandbox = Sandbox::new();
     let output = sandbox
         .command(&["run", "opus", "job"])
-        .env("CODEX_SANDBOX_NETWORK_DISABLED", "1")
+        .env("CODEX_SANDBOX", "seatbelt")
         .output()
         .unwrap();
     assert!(!output.status.success());
     assert!(stderr(&output).contains("require_escalated"), "{}", stderr(&output));
     assert!(!sandbox.root().join("calls/claude").exists());
+
+    // Codex keeps this one for a command the user approved to run outside the sandbox.
+    let escalated = sandbox
+        .command(&["run", "opus", "job"])
+        .env("CODEX_SANDBOX_NETWORK_DISABLED", "1")
+        .output()
+        .unwrap();
+    assert!(escalated.status.success(), "{}", stderr(&escalated));
+}
+
+#[test]
+fn a_failed_worktree_leaves_no_branch_behind() {
+    let sandbox = Sandbox::new();
+    let work = sandbox.repo();
+    let parent = sandbox.root().join("state/brigade/worktrees/work");
+    fs::create_dir_all(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let output = sandbox.brigade(&["run", "hydrogen", "--write", "--worktree", "build"]);
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!output.status.success());
+    assert_eq!(git_in(&work, &["branch", "--list", "brigade/*"]), "");
+}
+
+#[test]
+fn pruning_a_run_removes_the_worktree_it_left_unchanged() {
+    let sandbox = Sandbox::new();
+    let work = sandbox.repo();
+    let unchanged = sandbox.brigade(&["run", "hydrogen", "--write", "--worktree", "look"]);
+    assert!(unchanged.status.success(), "{}", stderr(&unchanged));
+    let changed = sandbox
+        .command(&["run", "hydrogen", "--write", "--worktree", "build"])
+        .env("FAKE_WRITE", "made.txt")
+        .output()
+        .unwrap();
+    assert!(changed.status.success(), "{}", stderr(&changed));
+    assert_eq!(git_in(&work, &["branch", "--list", "brigade/*"]).lines().count(), 2);
+
+    assert_eq!(
+        stdout(&sandbox.brigade(&["runs", "--prune"])),
+        "deleted 2 finished run(s)\n"
+    );
+    let left = git_in(&work, &["branch", "--list", "brigade/*"]);
+    assert_eq!(left.lines().count(), 1, "{left}");
+    let branch = left.trim().trim_start_matches(['*', '+', ' ']);
+    assert_eq!(
+        git_in(&work, &["log", "--format=%s", &format!("main..{branch}")]).trim(),
+        "build"
+    );
+}
+
+#[test]
+fn the_continue_line_quotes_a_model_the_shell_would_expand() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.brigade(&["run", "opus", "--model", "sonnet[1m]", "look"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains(" --model 'sonnet[1m]'"), "{}", stdout(&output));
+}
+
+#[test]
+fn a_misspelled_option_is_refused_rather_than_taken_as_the_task() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.brigade_with_stdin(&["run", "sol", "--write", "--worktre"], "Fix the race.\n");
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("unexpected argument '--worktre'"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!sandbox.root().join("calls/codex").exists());
+}
+
+#[test]
+fn an_agy_transport_error_naming_resource_exhausted_is_a_limit() {
+    let sandbox = Sandbox::new();
+    let fake = sandbox.root().join("bin/agy");
+    fs::remove_file(&fake).unwrap();
+    fs::write(
+        &fake,
+        "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '{\"conversation_id\":\"c-1\",\"status\":\"ERROR\",\"error\":\"generating and executing: transport error (ResourceExhausted, HTTP 429): Resource has been exhausted (e.g. check quota).\"}'\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = sandbox.brigade(&["run", "neon", "job"]);
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
 }

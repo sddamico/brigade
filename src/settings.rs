@@ -1,5 +1,6 @@
 use crate::harness::Harness;
 use crate::invocation::{UnsetVar, expand};
+use crate::process;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -25,8 +26,9 @@ pub struct Settings {
     pub claude_agents_dir: PathBuf,
     pub codex_agents_dir: PathBuf,
     pub agy_agents_dir: PathBuf,
-    /// Whether brigade is running inside Codex's sandbox, where a harness can't
-    /// reach its API and a detached run dies with the shell call that started it.
+    /// Whether brigade is running inside Codex's sandbox, where a detached run
+    /// dies with the shell call that started it, and a harness may not reach
+    /// its API.
     pub in_codex_sandbox: bool,
 }
 
@@ -67,8 +69,10 @@ impl Settings {
             codex_agents_dir: codex.join("agents"),
             // agy only looks at the top of this directory, not in subdirectories.
             agy_agents_dir: home.join(".gemini/config/agents"),
-            // Codex sets the first on Linux and macOS, and the second on macOS.
-            in_codex_sandbox: set("CODEX_SANDBOX_NETWORK_DISABLED").is_some() || set("CODEX_SANDBOX").is_some(),
+            // Codex sets CODEX_SANDBOX=seatbelt for a command it runs in its macOS
+            // sandbox. Not CODEX_SANDBOX_NETWORK_DISABLED: Codex keeps that one for
+            // commands the user approved to run outside the sandbox, too.
+            in_codex_sandbox: set("CODEX_SANDBOX").as_deref() == Some("seatbelt") || process::in_codex_linux_sandbox(),
             home,
         })
     }

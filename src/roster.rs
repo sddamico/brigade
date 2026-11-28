@@ -753,13 +753,23 @@ fn check_unique<'a>(names: impl Iterator<Item = &'a str>, origin: &str, what: &s
 
 fn is_date(text: &str) -> bool {
     let parts: Vec<&str> = text.split('-').collect();
-    let digits = parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()));
-    match parts.as_slice() {
-        [y, m, d] if digits && y.len() == 4 && m.len() == 2 && d.len() == 2 => {
-            matches!(m.parse::<u32>(), Ok(1..=12)) && matches!(d.parse::<u32>(), Ok(1..=31))
-        }
-        _ => false,
+    let digits = parts
+        .iter()
+        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    let [y, m, d] = parts.as_slice() else { return false };
+    if !digits || y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return false;
     }
+    let (year, month, day): (u32, u32, u32) = (y.parse().unwrap(), m.parse().unwrap(), d.parse().unwrap());
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&day)
 }
 
 fn check_agent_name(name: &str, origin: &str) -> Result<(), RosterError> {
@@ -791,6 +801,20 @@ fn is_valid_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::is_date;
+
+    #[test]
+    fn a_read_date_has_to_be_on_the_calendar() {
+        assert!(is_date("2026-11-27"));
+        assert!(is_date("2028-02-29"));
+        assert!(!is_date("2026-02-29"));
+        assert!(!is_date("2026-02-31"));
+        assert!(!is_date("2026-04-31"));
+        assert!(!is_date("2026-13-01"));
+        assert!(!is_date("2026-00-10"));
+        assert!(!is_date("yesterday"));
+    }
+
     use super::*;
     use std::io::Write;
 
