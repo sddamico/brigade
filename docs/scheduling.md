@@ -57,13 +57,17 @@ A user runs one long-lived scheduling agent. It takes in work, breaks it into ta
 - `brigade capacity` shows all of it
 - Verified with real Claude and Codex limits where possible, and fake CLIs for the rest
 
-## Phase 2: events, Codex limits, the scheduler
+## Phase 2
 
-- **`brigade watch [--json]`** streams events the scheduler blocks on instead of polling: run started, finished, limited or fell back; account limited or freed
-- **Codex** limits from `codex app-server` (`account/rateLimits/read`), so capacity shows Codex usage before a limit hits
-- **agy** probing on the backoff schedule
-- **Roster `strengths`** (free text such as "frontier reasoning", "fast and cheap", "local, private") that `brigade capacity` lists, for the scheduler to match tasks against
-- **A `scheduler` agent** and a scheduler skill for all three hosts. It keeps its task list, picks an agent per task from `brigade capacity`, starts runs with `--detach --wait` and an appropriate fallback, collects results with `brigade watch`, and reports to the user. The intended home is a long-running Claude Code session on `/loop`, or `codex`'s and agy's equivalents
+Revised after phase 1, once it turned out every harness reports usage for free and agy offers Claude models on a separate allowance.
+
+1. **Quotas and routes** (0.7.0)
+   - Accounts own agents: each opts into catalog agents or defines its own
+   - An agent several accounts offer has a route through each, and a run takes the first with capacity. Opus runs on agy's Claude allowance when the subscription's opus is limited
+   - `brigade capacity --refresh` reads quotas from Claude Code's `/usage`, agy's `/usage` (model groups) and the Codex app server's `account/rateLimits/read`. They count usage from every session on the account, Pappardelle's included. Reads happen only on request
+2. **`brigade agents` and the "full brigade" skill**: one command, `--json`, listing every agent with its routes, what it's best for, its quotas and whether it can run now. The skill triggers on "you have the full brigade available to you", for any orchestrator, and points it there
+3. **`brigade mcp`**: tools for agents, capacity, run, wait, cancel, runs and `next_event`, plus the MCP Events extension (SEP-3415: `events/list`, `events/poll`, `events/stream`) over a persistent event log, so a scheduler that reconnects catches up. `next_event` is for hosts without Events support; Claude Code shows none yet, Codex appears to have it
+4. **The scheduler**: an agent definition and skill. It keeps its task list, reads `brigade agents`, starts runs (or opens Pappardelle spaces, mapping agents to Pappardelle profiles itself), collects results from events, and reports
 
 ## Later
 
