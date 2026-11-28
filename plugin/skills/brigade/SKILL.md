@@ -33,13 +33,13 @@ An agent from your own harness's family runs on your ordinary subagents; brigade
 
 - opus, fable and sonnet: use the Agent tool as usual, with `model: "opus"` (or `fable`, `sonnet`) and `effort` if one was asked for
 - sol, astra, neon and hydrogen: `Agent(subagent_type: "brigade:<name>")`, a forwarder that runs the agent's own CLI. Put the routing in the prompt in plain words: "this is a write run", "use model `<id>`", "use effort high", "use your own worktree", or "continue session `<id>` in `<dir>`". Don't set `isolation` on a forwarder's Agent call: ask for a worktree in the prompt and brigade makes it
-- An agent from the user's roster, such as claude-local: `brigade:forward`, with `agent: <name>` as the first line of the prompt
+- An agent from the user's roster, such as claude-local: its own subagent, `Agent(subagent_type: "claude-local")`, once the user has run `brigade install-agents`. Otherwise `brigade:forward`, with `agent: <name>` as the first line of the prompt
 
 ### In Codex
 
 - sol and astra: `spawn_agent` with `model: "gpt-6.2-sol"` (or `gpt-6.2-astra`) and `reasoning_effort` if one was asked for
 - opus, fable, sonnet, neon and hydrogen: `spawn_agent` with `agent_type: "<name>"`, a forwarder role, with routing in the message as above
-- An agent from the user's roster: `agent_type: "forward"`, with `agent: <name>` as the first line of the message
+- An agent from the user's roster: `agent_type: "<name>"` once the user has run `brigade install-agents`, otherwise `agent_type: "forward"`, with `agent: <name>` as the first line of the message
 - Collect replies with `wait_agent`
 - Codex runs only a few subagents at once (`[agents] max_threads` in config.toml, 4 by default, counting the session itself). Team members beyond the free slots can run from the shell with `brigade run --detach` and `brigade wait`
 
@@ -47,7 +47,7 @@ An agent from your own harness's family runs on your ordinary subagents; brigade
 
 - neon and hydrogen: `invoke_subagent` with `TypeName: "self"`. agy subagents can only pick a tier, not a model id, so `Model: "inherit"` keeps the session's own model. When the session is on another model than the one asked for, use `forward` with `agent: neon` instead
 - opus, fable, sonnet, sol and astra: `invoke_subagent` with `TypeName: "<name>"`, a forwarder, with routing in the prompt as above
-- An agent from the user's roster: `TypeName: "forward"`, with `agent: <name>` at the top of the prompt
+- An agent from the user's roster: `TypeName: "<name>"` once the user has run `brigade install-agents`, otherwise `TypeName: "forward"`, with `agent: <name>` at the top of the prompt
 
 ### From a shell
 

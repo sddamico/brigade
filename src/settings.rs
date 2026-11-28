@@ -1,3 +1,4 @@
+use crate::harness::Harness;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -18,6 +19,10 @@ pub struct Settings {
     pub state_dir: PathBuf,
     pub depth: u32,
     pub lease: Duration,
+    /// Where each harness finds the user's own subagents.
+    pub claude_agents_dir: PathBuf,
+    pub codex_agents_dir: PathBuf,
+    pub agy_agents_dir: PathBuf,
 }
 
 impl Settings {
@@ -42,12 +47,30 @@ impl Settings {
                 .map_err(|_| format!("BRIGADE_LEASE_SECS is `{value}`, not a number of seconds"))?,
             None => DEFAULT_LEASE_SECS,
         };
+        let claude = set("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".claude"));
+        let codex = set("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
         Ok(Settings {
             roster_file: config.join("brigade/roster.toml"),
             state_dir: state.join("brigade"),
             depth,
             lease: Duration::from_secs(lease),
+            claude_agents_dir: claude.join("agents"),
+            codex_agents_dir: codex.join("agents"),
+            // agy only looks at the top of this directory, not in subdirectories.
+            agy_agents_dir: home.join(".gemini/config/agents"),
         })
+    }
+
+    pub fn agents_dir(&self, host: Harness) -> &PathBuf {
+        match host {
+            Harness::Claude => &self.claude_agents_dir,
+            Harness::Codex => &self.codex_agents_dir,
+            Harness::Agy => &self.agy_agents_dir,
+        }
     }
 
     pub fn runs_dir(&self) -> PathBuf {

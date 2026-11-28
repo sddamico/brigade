@@ -8,6 +8,7 @@ A Rust CLI (`src/`) plus a plugin for Claude Code, Codex and agy (`plugin/`). Th
 - `src/invocation.rs`: per-harness command lines and output parsing; the rules every harness quirk lives in
 - `src/runs.rs`: run directories, the worker, the lease, waiting and cancelling
 - `src/process.rs`: a harness's whole process tree, for cancelling (including commands it started in sessions of their own), and a waiter's lineage, for noticing its caller is gone
+- `src/install.rs`: `brigade install-agents`, which writes forwarders for the user's own agents into each harness's user-level agents directory, marked so it only touches its own files
 - `src/render.rs`: renders everything under `plugin/` (and `.claude-plugin/marketplace.json`) from the roster. A host only gets forwarders for agents from other harnesses; its own family stays on its ordinary subagents
 - `plugin/skills/brigade/SKILL.md`: hand-written, except the roster table between the markers
 

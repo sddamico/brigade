@@ -5,7 +5,7 @@
 
 use crate::harness::Harness;
 use crate::report::WAIT_SLICE_SECS;
-use crate::roster::{Agent, FORWARD, Roster};
+use crate::roster::{Agent, FORWARD, Roster, Source};
 use serde::Serialize;
 use serde_json::json;
 use std::path::PathBuf;
@@ -35,7 +35,12 @@ const AGY_FORWARDER_TIER: &str = "flash";
 /// no longer writes.
 pub const GENERATED_DIRS: [&str; 3] = ["plugin/claude/agents", "plugin/codex/agents", "plugin/agents"];
 
-const HOSTS: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Agy];
+pub const HOSTS: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Agy];
+
+/// Marks a forwarder `brigade install-agents` wrote, so it only ever rewrites
+/// or removes its own files among the user's other agents.
+pub const INSTALLED_MARK: &str =
+    "# Written by `brigade install-agents` from your brigade roster, which rewrites or removes it.";
 
 /// Whether `host` gets a brigade forwarder for `agent`. An agent from the host's
 /// own family runs on the host's ordinary subagents instead, so brigade never
@@ -80,6 +85,45 @@ pub fn plugin_files(roster: &Roster, version: &str, skill_template: &str) -> Res
     ));
     files.push((plugin_path(&format!("agents/{FORWARD}.md")), agy_forward(&agents)));
     Ok(files)
+}
+
+/// Forwarders for the user's own agents, which the published plugin can't know
+/// about, as (host, file name, contents). Every host gets one, since an agent's
+/// env and args set it apart from the host's own subagents. A user entry that
+/// replaces a built-in agent already has the plugin's forwarder.
+pub fn installed_forwarders(roster: &Roster) -> Vec<(Harness, String, String)> {
+    let agents: Vec<&Agent> = roster.entries().iter().map(|e| &e.agent).collect();
+    let built_in = Roster::built_in();
+    let mut files = Vec::new();
+    for entry in roster.entries() {
+        let agent = &entry.agent;
+        if entry.source != Source::User || built_in.get(&agent.name).is_some() {
+            continue;
+        }
+        for host in HOSTS {
+            files.push(match host {
+                Harness::Claude => (
+                    host,
+                    format!("{}.md", agent.name),
+                    marked(&claude_agent(agent, &agents)),
+                ),
+                Harness::Codex => (
+                    host,
+                    format!("{}.toml", agent.name),
+                    format!("{INSTALLED_MARK}\n{}", codex_agent(agent, &agents)),
+                ),
+                Harness::Agy => (host, format!("{}.md", agent.name), marked(&agy_agent(agent, &agents))),
+            });
+        }
+    }
+    files
+}
+
+fn marked(markdown: &str) -> String {
+    let rest = markdown
+        .strip_prefix("---\n")
+        .expect("forwarders start with frontmatter");
+    format!("---\n{INSTALLED_MARK}\n{rest}")
 }
 
 fn plugin_path(rel: &str) -> PathBuf {

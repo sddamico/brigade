@@ -10,7 +10,7 @@
 
 **Native subagent**: the host's ordinary subagent, used for an agent from the host's own family (opus in Claude Code, sol in Codex, neon in agy). brigade ships no definition for these and isn't involved.
 
-**Forwarder**: a subagent definition whose only job is to start a run through the brigade CLI and return the reply. A host gets one for each agent from another harness. Forwarders run on a small model of the host's: sonnet in Claude Code, gpt-6-luna in Codex, the flash tier in agy. `forward` is the generic forwarder, which takes the agent's name from the request and covers user-roster agents.
+**Forwarder**: a subagent definition whose only job is to start a run through the brigade CLI and return the reply. A host gets one for each agent from another harness. Forwarders run on a small model of the host's: sonnet in Claude Code, gpt-6-luna in Codex, the flash tier in agy. `forward` is the generic forwarder, which takes the agent's name from the request and covers user-roster agents. `brigade install-agents` gives each user-roster agent a forwarder of its own, in each harness's user-level agents directory.
 
 **Run**: one task handed to one agent through the brigade CLI. Each run has an id (`<agent>-<hex>`) and a directory under `~/.local/state/brigade/runs/` holding the request, the harness's logs and the outcome.
 

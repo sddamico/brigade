@@ -36,9 +36,9 @@ Runs are read-only unless asked to write, and use the agent's model at the harne
 The CLI, with cargo or mise:
 
 ```sh
-cargo install --git https://github.com/sddamico/brigade --tag v0.3.5
+cargo install --git https://github.com/sddamico/brigade --tag v0.4.0
 # or, in ~/.config/mise/config.toml:
-# "cargo:https://github.com/sddamico/brigade" = "tag:v0.3.5"
+# "cargo:https://github.com/sddamico/brigade" = "tag:v0.4.0"
 ```
 
 The plugin, from this repo's marketplace:
@@ -50,13 +50,13 @@ claude plugin install brigade@brigade
 codex plugin marketplace add https://github.com/sddamico/brigade.git
 codex plugin add brigade@brigade
 
-agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.3.5
+agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.4.0
 ```
 
 Codex plugins can't ship subagent roles, so link the roles from Codex's copy of the plugin into `~/.codex/agents`, which Codex searches recursively. Re-point it after a plugin update:
 
 ```sh
-ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.3.5/codex/agents ~/.codex/agents/brigade
+ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.4.0/codex/agents ~/.codex/agents/brigade
 ```
 
 Each agent needs its harness's CLI installed and logged in.
@@ -107,7 +107,7 @@ ANTHROPIC_SMALL_FAST_MODEL = "$LOCAL_MODEL"
 CLAUDE_CODE_MAX_CONTEXT_TOKENS = "196608"
 ```
 
-User agents don't get a subagent of their own; the generic `forward` subagent runs them in every harness.
+`brigade install-agents` gives each of your agents a subagent of its own in all three harnesses, so a host can pick it by name like a built-in one. It writes them to `~/.claude/agents`, `~/.codex/agents` and `~/.gemini/config/agents`, and only ever rewrites or removes files it wrote. Run it again after changing the roster or upgrading brigade. Until then, the generic `forward` subagent runs your agents.
 
 A `[fallbacks]` table names the agent a run switches to when its agent hits a usage limit. The fallback gets the same task and reports the switch. Pick one from another harness: an agent's siblings in the same CLI usually share its account's limit.
 

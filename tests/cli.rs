@@ -834,3 +834,68 @@ fn work_committed_on_the_agents_own_branch_lands_on_the_runs_branch() {
     let path = out.split("in worktree ").nth(1).unwrap().lines().next().unwrap();
     assert_eq!(git_in(Path::new(path), &["branch", "--show-current"]).trim(), branch);
 }
+
+#[test]
+fn install_agents_gives_each_user_agent_a_subagent_in_every_harness() {
+    let sandbox = Sandbox::new();
+    let roster = r#"
+[[agent]]
+name = "claude-local"
+harness = "claude"
+model = "local"
+description = "Claude Code on the local model"
+
+[[agent]]
+name = "sol"
+harness = "codex"
+model = "gpt-6.1-sol"
+description = "pinned to the previous Sol"
+"#;
+    sandbox.user_roster(roster);
+    let home = sandbox.root();
+    let theirs = home.join(".claude/agents/mine.md");
+    fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+    fs::write(&theirs, "---\nname: mine\n---\n").unwrap();
+
+    let installed = sandbox.brigade(&["install-agents"]);
+    assert!(installed.status.success(), "{}", stderr(&installed));
+    let files = [
+        ".claude/agents/claude-local.md",
+        ".codex/agents/claude-local.toml",
+        ".gemini/config/agents/claude-local.md",
+    ];
+    for file in files {
+        let text = fs::read_to_string(home.join(file)).unwrap();
+        assert!(text.contains("brigade run claude-local"), "{file}: {text}");
+    }
+    let claude = fs::read_to_string(home.join(files[0])).unwrap();
+    assert!(
+        claude.starts_with("---\n# Written by `brigade install-agents`"),
+        "{claude}"
+    );
+    assert!(claude.contains("\nname: claude-local\n"), "{claude}");
+    let codex: toml::Value = toml::from_str(&fs::read_to_string(home.join(files[1])).unwrap()).unwrap();
+    assert_eq!(codex["name"].as_str(), Some("claude-local"));
+    assert!(
+        !home.join(".claude/agents/sol.md").exists(),
+        "a replaced built-in keeps the plugin's forwarder"
+    );
+
+    let again = sandbox.brigade(&["install-agents"]);
+    assert_eq!(
+        stdout(&again),
+        "the subagents for your roster's agents are up to date\n"
+    );
+
+    sandbox.user_roster("");
+    let removed = sandbox.brigade(&["install-agents"]);
+    assert_eq!(stdout(&removed).matches("removed ").count(), 3, "{}", stdout(&removed));
+    assert!(files.iter().all(|file| !home.join(file).exists()));
+    assert!(theirs.exists(), "the user's own agents stay");
+
+    fs::write(home.join(files[0]), "someone else's").unwrap();
+    sandbox.user_roster(roster);
+    let kept = sandbox.brigade(&["install-agents"]);
+    assert!(stderr(&kept).contains("brigade didn't write it"), "{}", stderr(&kept));
+    assert_eq!(fs::read_to_string(home.join(files[0])).unwrap(), "someone else's");
+}

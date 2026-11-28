@@ -1,4 +1,5 @@
 use brigade::harness::{Access, Effort};
+use brigade::install::{self, Change};
 use brigade::invocation::{UnsetVar, expand};
 use brigade::process::Lineage;
 use brigade::report::{self, WAIT_SLICE_SECS};
@@ -53,6 +54,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Give each agent from your own roster a subagent of its own in Claude Code, Codex and agy. Run it again
+    /// after changing the roster or upgrading brigade
+    InstallAgents,
     #[command(name = "__exec", hide = true)]
     Exec { run: String },
 }
@@ -131,6 +135,23 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
             let (_, dir) = RunDir::open(&settings, &run)?;
             let state = dir.cancel("cancelled with brigade cancel")?;
             let _ = print_state(&dir, &state, json, 0)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::InstallAgents => {
+            let roster = Roster::load(&settings.roster_file).map_err(|e| e.to_string())?;
+            let changes = install::install(&roster, &settings)?;
+            if changes.is_empty() {
+                println!("the subagents for your roster's agents are up to date");
+            }
+            for change in changes {
+                match change {
+                    Change::Wrote(path) => println!("wrote {}", path.display()),
+                    Change::Removed(path) => println!("removed {}", path.display()),
+                    Change::NotOurs(path) => {
+                        eprintln!("left {} alone: brigade didn't write it", path.display())
+                    }
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Exec { run } => {

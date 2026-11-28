@@ -1,4 +1,5 @@
 pub mod harness;
+pub mod install;
 pub mod invocation;
 pub mod process;
 pub mod render;
