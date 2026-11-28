@@ -6,6 +6,10 @@
 # effort:   optional; without it, and without --effort on the call, the harness's
 #           own default effort applies
 # env/args: extra environment and CLI arguments; values expand $VAR and ${VAR}
+#
+# A user roster can also have a [fallbacks] table, `sol = "opus"`, naming the
+# agent a run switches to when its agent hits a usage limit. The built-in roster
+# has none, since which accounts a user has is theirs to say.
 
 [[agent]]
 name = "opus"

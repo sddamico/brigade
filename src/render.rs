@@ -22,9 +22,10 @@ const AUTHOR: &str = "Stephen D'Amico";
 const AUTHOR_URL: &str = "https://github.com/sddamico";
 const KEYWORDS: [&str; 5] = ["subagents", "multi-agent", "codex", "antigravity", "claude-code"];
 
-/// Forwarders only pass a task along, so each harness runs them on its cheapest
-/// model.
-const CLAUDE_FORWARDER_MODEL: &str = "haiku";
+/// Forwarders only pass a task along, so each harness runs them on a small
+/// model, the smallest that relays replies faithfully.
+// haiku paraphrased long replies, and once a [brigade] line, despite the instructions.
+const CLAUDE_FORWARDER_MODEL: &str = "sonnet";
 const CODEX_FORWARDER_MODEL: &str = "gpt-6-luna";
 const CODEX_FORWARDER_EFFORT: &str = "low";
 // flash_lite answered trivial tasks itself instead of running brigade.
@@ -179,7 +180,7 @@ fn asks_for(name: &str) -> String {
 fn forwarder_description(agent: &Agent, host: Harness) -> String {
     format!(
         "{}, run in its own CLI through brigade. {} Say in the prompt if the task should change files, \
-         which model or effort to use, or which session to continue.{}",
+         which model or effort to use, which session to continue, or which agent to fall back to on a usage limit.{}",
         agent.description,
         asks_for(&agent.name),
         worktree_hint(host),
@@ -295,6 +296,8 @@ run anything: reply that {name} doesn't take that effort and which ones it does
 any wording (\"use your own worktree\", \"work in a worktree of the repo\"). Never add it otherwise
    - `--resume <session> --cwd <dir>` when it continues an earlier run; both come from that run's \
 `[brigade] continue it with:` line
+   - `--fallback <agent>` when it names an agent to switch to if {name} hits a usage limit (\"fall back to \
+opus\"), or `--no-fallback` when it says not to switch
 
 2. That prints a run id. Wait for it with `brigade wait <run id> --timeout {WAIT_SLICE_SECS}`. While it reports \
 that the run is still running, call it again.
@@ -306,8 +309,9 @@ changes are. If brigade fails, reply with its error output the same way.
 
 4. You may get follow-up messages after your reply. Each one is a new task for {name} in the same session: \
 run it through steps 1 to 3, adding the `--resume <session> --cwd <dir>` (and any `--write`, `--model` or \
-`--effort`) from your previous run's `[brigade] continue it with:` line. Never answer a follow-up from what \
-you remember.
+`--effort`) from your previous run's `[brigade] continue it with:` line. When that line names another agent \
+than {name}, because the run fell back to it, run that agent. Never answer a follow-up from what you \
+remember.
 "
     )
 }

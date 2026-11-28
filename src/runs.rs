@@ -8,7 +8,7 @@
 //! and a worker whose lease lapses cancels its run. Stopping a forwarder
 //! subagent, or the session it belongs to, stops the waiting and so the work.
 
-use crate::harness::{Access, Effort};
+use crate::harness::{Access, Effort, Harness};
 use crate::invocation::{self, ParseFailure, Request};
 use crate::process::Tree;
 use crate::roster::Agent;
@@ -44,6 +44,37 @@ pub struct RunRecord {
     /// The depth the worker runs at, one more than whoever started it.
     pub depth: u32,
     pub started_at: u64,
+    /// The agent the task goes to instead if `agent` hits a usage limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<Agent>,
+    /// Set once the run has switched to its fallback, which `agent` now is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fell_back_from: Option<FellBack>,
+}
+
+/// The agent a run started on before a usage limit made it switch.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FellBack {
+    pub agent: String,
+    pub harness: Harness,
+    /// The harness's message about the limit, which says when it resets.
+    pub error: String,
+}
+
+impl RunRecord {
+    fn fall_back(mut self, fallback: Agent, error: &str) -> RunRecord {
+        self.fell_back_from = Some(FellBack {
+            agent: self.agent.name.clone(),
+            harness: self.agent.harness,
+            error: error.to_string(),
+        });
+        // The call's model and effort were chosen for the first agent's harness.
+        self.model = fallback.model.clone();
+        self.effort = fallback.effort;
+        self.agent = fallback;
+        self.fallback = None;
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -97,9 +128,14 @@ impl RunDir {
         let dir = RunDir {
             path: settings.runs_dir().join(id),
         };
-        let text = fs::read_to_string(dir.file("run.json")).map_err(|_| format!("there's no run `{id}`"))?;
-        let record = serde_json::from_str(&text).map_err(|e| format!("run `{id}` has a bad run.json: {e}"))?;
+        let record = dir.record().map_err(|_| format!("there's no run `{id}`"))?;
         Ok((record, dir))
+    }
+
+    /// The run as it stands, which names the fallback agent once it has switched.
+    pub fn record(&self) -> Result<RunRecord, String> {
+        let text = fs::read_to_string(self.file("run.json")).map_err(|e| format!("can't read run.json: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("bad run.json: {e}"))
     }
 
     pub fn path(&self) -> &Path {
@@ -123,6 +159,10 @@ impl RunDir {
     pub fn write_request(&self, record: &RunRecord, task: &str) -> Result<(), String> {
         self.renew_lease()?;
         write_atomic(&self.file("task.txt"), task.as_bytes())?;
+        self.write_record(record)
+    }
+
+    fn write_record(&self, record: &RunRecord) -> Result<(), String> {
         write_atomic(
             &self.file("run.json"),
             &serde_json::to_vec_pretty(record).expect("records serialize"),
@@ -248,12 +288,25 @@ pub fn spawn_worker(record: &RunRecord, dir: &RunDir) -> Result<Child, String> {
 
 /// The worker's job: runs the harness CLI for `record` until it exits, the run
 /// is cancelled or its lease lapses, and records the outcome.
-pub fn execute(record: &RunRecord, dir: &RunDir, lease: Duration, var: &dyn Fn(&str) -> Option<String>) -> Outcome {
+pub fn execute(record: RunRecord, dir: &RunDir, lease: Duration, var: &dyn Fn(&str) -> Option<String>) -> Outcome {
+    let mut record = record;
     let task = dir.task();
-    let outcome = match &task {
-        Ok(task) => run_harness(record, dir, task, lease, var),
+    let mut outcome = match &task {
+        Ok(task) => run_harness(&record, dir, task, lease, var),
         Err(error) => Outcome::Failed { error: error.clone() },
     };
+    if let Outcome::Limited { error } = &outcome
+        && let Some(fallback) = record.fallback.clone()
+        && let Ok(task) = &task
+    {
+        record = record.fall_back(fallback, error);
+        // Written before the fallback starts, so a waiter reports the agent that ran.
+        outcome = match dir.write_record(&record) {
+            Ok(()) => run_harness(&record, dir, task, lease, var),
+            Err(error) => Outcome::Failed { error },
+        };
+    }
+    let record = &record;
     if let Some(worktree) = &record.worktree {
         let state = match &outcome {
             Outcome::Done { .. } => worktree::commit(worktree, &commit_message(record, task.as_deref().unwrap_or(""))),

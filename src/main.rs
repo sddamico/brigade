@@ -2,7 +2,7 @@ use brigade::harness::{Access, Effort};
 use brigade::invocation::{UnsetVar, expand};
 use brigade::process::Lineage;
 use brigade::report::{self, WAIT_SLICE_SECS};
-use brigade::roster::Roster;
+use brigade::roster::{Agent, Roster};
 use brigade::runs::{self, Outcome, RunDir, RunRecord, State};
 use brigade::settings::{MAX_DEPTH, Settings};
 use brigade::worktree;
@@ -80,6 +80,12 @@ struct RunArgs {
     /// Continue the session a previous run printed
     #[arg(long, value_name = "SESSION")]
     resume: Option<String>,
+    /// Agent to hand the task to if this one hits its harness's usage limit, in place of the roster's fallback
+    #[arg(long, value_name = "AGENT", conflicts_with_all = ["resume", "no_fallback"])]
+    fallback: Option<String>,
+    /// Don't switch to the roster's fallback agent on a usage limit
+    #[arg(long)]
+    no_fallback: bool,
     /// Start the run in the background, print its id and return. It's cancelled if nobody waits on it for 90s
     #[arg(long)]
     detach: bool,
@@ -117,26 +123,20 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         }
         Command::Run(args) => run(&settings, args),
         Command::Wait { run, timeout, json } => {
-            let (record, dir) = RunDir::open(&settings, &run)?;
+            let (_, dir) = RunDir::open(&settings, &run)?;
             let state = dir.wait(timeout.map(Duration::from_secs), &orphan_check());
-            Ok(print_state(
-                &record,
-                &dir,
-                &state,
-                json,
-                timeout.unwrap_or(WAIT_SLICE_SECS),
-            ))
+            print_state(&dir, &state, json, timeout.unwrap_or(WAIT_SLICE_SECS))
         }
         Command::Cancel { run, json } => {
-            let (record, dir) = RunDir::open(&settings, &run)?;
+            let (_, dir) = RunDir::open(&settings, &run)?;
             let state = dir.cancel("cancelled with brigade cancel")?;
-            let _ = print_state(&record, &dir, &state, json, 0);
+            let _ = print_state(&dir, &state, json, 0)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Exec { run } => {
             let (record, dir) = RunDir::open(&settings, &run)?;
             if !matches!(dir.state(), State::Finished(_)) {
-                runs::execute(&record, &dir, settings.lease, &env_var);
+                runs::execute(record, &dir, settings.lease, &env_var);
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -173,6 +173,13 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
             levels.join(", ")
         ));
     }
+    // A resumed session lives in its own harness, where no other agent can pick it up.
+    let fallback = match (&args.fallback, args.no_fallback || args.resume.is_some()) {
+        (Some(name), _) => Some(name.as_str()),
+        (None, false) => entry.fallback.as_deref(),
+        (None, true) => None,
+    };
+    let fallback = fallback.map(|name| fallback_agent(&roster, &agent, name)).transpose()?;
     let task = read_task(&args.task)?;
     let cwd = args
         .cwd
@@ -206,6 +213,8 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         resume: args.resume,
         depth: settings.depth + 1,
         started_at: runs::now(),
+        fallback,
+        fell_back_from: None,
     };
     dir.write_request(&record, &task)?;
 
@@ -228,12 +237,31 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         State::Running if INTERRUPTED.load(Ordering::SeqCst) => dir.cancel("interrupted")?,
         state => state,
     };
-    let code = print_state(&record, &dir, &state, args.json, 0);
+    let code = print_state(&dir, &state, args.json, 0)?;
     Ok(if INTERRUPTED.load(Ordering::SeqCst) {
         ExitCode::from(INTERRUPTED_EXIT)
     } else {
         code
     })
+}
+
+fn fallback_agent(roster: &Roster, agent: &Agent, name: &str) -> Result<Agent, String> {
+    if name == agent.name {
+        return Err(format!("{name} can't fall back to itself"));
+    }
+    let mut fallback = roster
+        .get(name)
+        .ok_or_else(|| {
+            format!(
+                "no agent `{name}` to fall back to; try one of: {}",
+                roster.names().join(", ")
+            )
+        })?
+        .agent
+        .clone();
+    fallback.model =
+        expand(&fallback.model, &env_var).map_err(|UnsetVar(var)| format!("`{name}` needs ${var}, which isn't set"))?;
+    Ok(fallback)
 }
 
 /// True once whoever started this process is gone. A waiter whose forwarder
@@ -268,14 +296,16 @@ fn trap_interrupt() {
     }
 }
 
-fn print_state(record: &RunRecord, dir: &RunDir, state: &State, json: bool, waited: u64) -> ExitCode {
+/// Reads the run afresh, since a run that fell back now names its fallback agent.
+fn print_state(dir: &RunDir, state: &State, json: bool, waited: u64) -> Result<ExitCode, String> {
+    let record = &dir.record()?;
     if json {
         print!(
             "{}",
             report::state_json(record, state, dir.path(), dir.worktree_state().as_ref())
         );
     }
-    match state {
+    Ok(match state {
         State::Finished(Outcome::Done { session, message }) => {
             if !json {
                 print!(
@@ -324,7 +354,7 @@ fn print_state(record: &RunRecord, dir: &RunDir, state: &State, json: bool, wait
             }
             ExitCode::FAILURE
         }
-    }
+    })
 }
 
 fn read_task(words: &[String]) -> Result<String, String> {

@@ -10,7 +10,7 @@
 
 **Native subagent**: the host's ordinary subagent, used for an agent from the host's own family (opus in Claude Code, sol in Codex, neon in agy). brigade ships no definition for these and isn't involved.
 
-**Forwarder**: a subagent definition whose only job is to start a run through the brigade CLI and return the reply. A host gets one for each agent from another harness. Forwarders use the host's cheapest capable model. `forward` is the generic forwarder, which takes the agent's name from the request and covers user-roster agents.
+**Forwarder**: a subagent definition whose only job is to start a run through the brigade CLI and return the reply. A host gets one for each agent from another harness. Forwarders run on a small model of the host's: sonnet in Claude Code, gpt-6-luna in Codex, the flash tier in agy. `forward` is the generic forwarder, which takes the agent's name from the request and covers user-roster agents.
 
 **Run**: one task handed to one agent through the brigade CLI. Each run has an id (`<agent>-<hex>`) and a directory under `~/.local/state/brigade/runs/` holding the request, the harness's logs and the outcome.
 
@@ -29,6 +29,8 @@
 **Cancelled run**: a run stopped by `brigade cancel`, by Ctrl-C on a foreground run, or by its lease lapsing.
 
 **Usage limit**: the harness's account running out of usage, such as Claude Code's session or weekly limit, Codex's usage limit or agy's quota. A run that hits one ends as limited, with exit code 4, apart from other failures, because retrying it before the limit resets fails the same way.
+
+**Fallback**: the agent a run switches to when its agent hits a usage limit, chosen ahead of time in the user roster's `[fallbacks]` table or with `--fallback` on the call. The fallback gets the same task, in the same directory or worktree, on its own model and effort. Only one switch is made: a fallback's own fallback is never followed, and a resumed session never falls back.
 
 **Team**: several runs of one agent at once, one task each.
 

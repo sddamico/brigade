@@ -23,9 +23,10 @@ if [ -n "$FAKE_DETACHED_CHILD" ]; then
 fi
 [ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
 [ -n "$FAKE_WRITE" ] && printf 'changed\n' > "$FAKE_WRITE"
+[ -n "$FAKE_BRANCH" ] && git checkout -qb "$FAKE_BRANCH"
 [ -n "$FAKE_COMMIT" ] && printf 'mine\n' > "$FAKE_COMMIT" && git add -A && git commit -qm "agent's own commit"
 if [ -n "$FAKE_FAIL" ]; then echo "fake $name: $FAKE_FAIL" >&2; exit 1; fi
-if [ -n "$FAKE_LIMIT" ]; then
+case " $FAKE_LIMIT " in *" $name "*)
   case "$name" in
     claude) printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"api_error":"rate_limit","result":"You'"'"'ve hit your session limit · resets 1am (America/New_York)","session_id":"claude-session"}' ;;
     codex)
@@ -33,8 +34,8 @@ if [ -n "$FAKE_LIMIT" ]; then
       echo '{"type":"turn.failed","error":{"message":"You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 14th, 2026 7:50 AM."}}' ;;
     agy) printf '%s\n' '{"conversation_id":"agy-conversation","status":"ERROR","error":"RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).","finished_reason":"error"}' ;;
   esac
-  exit 1
-fi
+  exit 1 ;;
+esac
 case "$name" in
   claude) echo '{"type":"result","subtype":"success","is_error":false,"result":"claude reply","session_id":"claude-session"}' ;;
   codex)
@@ -287,7 +288,7 @@ fn a_usage_limit_is_its_own_outcome() {
     let sandbox = Sandbox::new();
     let output = sandbox
         .command(&["run", "sol", "go"])
-        .env("FAKE_LIMIT", "1")
+        .env("FAKE_LIMIT", "codex")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(4));
@@ -300,13 +301,99 @@ fn a_usage_limit_is_its_own_outcome() {
 
     let json = sandbox
         .command(&["run", "neon", "--json", "go"])
-        .env("FAKE_LIMIT", "1")
+        .env("FAKE_LIMIT", "agy")
         .output()
         .unwrap();
     assert_eq!(json.status.code(), Some(4));
     let value: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
     assert_eq!(value["status"], "limited");
     assert!(value["error"].as_str().unwrap().contains("RESOURCE_EXHAUSTED"));
+}
+
+#[test]
+fn a_limited_run_switches_to_its_fallback() {
+    let sandbox = Sandbox::new();
+    sandbox.user_roster("[fallbacks]\nsol = \"opus\"\n");
+
+    let output = sandbox
+        .command(&["run", "sol", "go"])
+        .env("FAKE_LIMIT", "codex")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.starts_with("claude reply\n"), "{out}");
+    assert!(
+        out.contains("[brigade] sol hit a usage limit in Codex, so opus ran instead: You’ve hit your usage limit."),
+        "{out}"
+    );
+    assert!(
+        out.contains("continue it with: brigade run opus --resume claude-session"),
+        "{out}"
+    );
+    let args = sandbox.args("claude");
+    assert!(args.windows(2).any(|pair| pair == ["--model", "opus"]), "{args:?}");
+
+    let started = sandbox
+        .command(&["run", "sol", "--detach", "go"])
+        .env("FAKE_LIMIT", "codex")
+        .output()
+        .unwrap();
+    let waited = sandbox.brigade(&["wait", &run_id(&stdout(&started))]);
+    assert!(
+        stdout(&waited).contains("[brigade] opus ran in claude"),
+        "{}",
+        stdout(&waited)
+    );
+
+    let both = sandbox
+        .command(&["run", "sol", "go"])
+        .env("FAKE_LIMIT", "codex claude")
+        .output()
+        .unwrap();
+    assert_eq!(both.status.code(), Some(4));
+    let err = stderr(&both);
+    assert!(
+        err.contains("sol hit a usage limit in Codex, so opus ran instead"),
+        "{err}"
+    );
+    assert!(
+        err.contains("[brigade] opus hit a usage limit in Claude Code: You've hit your session limit"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_call_can_pick_or_refuse_the_fallback() {
+    let sandbox = Sandbox::new();
+    sandbox.user_roster("[fallbacks]\nsol = \"opus\"\n");
+
+    let refused = sandbox
+        .command(&["run", "sol", "--no-fallback", "go"])
+        .env("FAKE_LIMIT", "codex")
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(4));
+
+    let picked = sandbox
+        .command(&["run", "sol", "--fallback", "neon", "go"])
+        .env("FAKE_LIMIT", "codex")
+        .output()
+        .unwrap();
+    assert!(picked.status.success(), "{}", stderr(&picked));
+    assert!(stdout(&picked).starts_with("agy reply\n"), "{}", stdout(&picked));
+    assert!(stdout(&picked).contains("so neon ran instead"), "{}", stdout(&picked));
+
+    let resumed = sandbox
+        .command(&["run", "sol", "--resume", "codex-thread", "go"])
+        .env("FAKE_LIMIT", "codex")
+        .output()
+        .unwrap();
+    assert_eq!(
+        resumed.status.code(),
+        Some(4),
+        "a resumed session can't move to another agent"
+    );
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
@@ -685,4 +772,30 @@ fn an_agent_that_commits_its_own_work_still_counts_as_changing_something() {
         git_in(&work, &["log", "--format=%s", &format!("main..{branch}")]).trim(),
         "agent's own commit"
     );
+}
+
+#[test]
+fn work_committed_on_the_agents_own_branch_lands_on_the_runs_branch() {
+    let sandbox = Sandbox::new();
+    let work = sandbox.repo();
+    let output = sandbox
+        .command(&["run", "neon", "--write", "--worktree", "go"])
+        .env("FAKE_BRANCH", "sd-own")
+        .env("FAKE_COMMIT", "self.txt")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    let branch = out.split("on branch ").nth(1).unwrap().split(',').next().unwrap();
+    assert!(branch.starts_with("brigade/neon-"), "{out}");
+    assert_eq!(
+        git_in(&work, &["log", "--format=%s", &format!("main..{branch}")]).trim(),
+        "agent's own commit"
+    );
+    assert!(
+        out.contains("[brigade] the agent also made branch sd-own at the same commit"),
+        "{out}"
+    );
+    let path = out.split("in worktree ").nth(1).unwrap().lines().next().unwrap();
+    assert_eq!(git_in(Path::new(path), &["branch", "--show-current"]).trim(), branch);
 }

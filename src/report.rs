@@ -15,7 +15,8 @@ pub const WAIT_SLICE_SECS: u64 = 100;
 pub fn done(record: &RunRecord, session: Option<&str>, message: &str, worktree: Option<&WorktreeState>) -> String {
     let agent = &record.agent;
     let mut out = format!(
-        "{message}\n\n[brigade] {} ran in {} ({}, {}, {}) as run {}\n",
+        "{message}\n\n{}[brigade] {} ran in {} ({}, {}, {}) as run {}\n",
+        fell_back(record),
         agent.name,
         agent.harness,
         record.model,
@@ -47,26 +48,48 @@ pub fn done(record: &RunRecord, session: Option<&str>, message: &str, worktree: 
 
 pub fn failed(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&WorktreeState>) -> String {
     format!(
-        "[brigade] {} failed: {error}\n{}[brigade] logs: {}\n",
+        "{}[brigade] {} failed: {error}\n{}[brigade] logs: {}\n",
+        fell_back(record),
         record.agent.name,
         worktree_lines(record, worktree),
         logs.display()
     )
 }
 
+/// Hosts often answer without loading the skill, so the advice on what to do
+/// next travels in the reply itself.
 pub fn limited(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&WorktreeState>) -> String {
+    let harness = record.agent.harness.product();
     format!(
-        "[brigade] {} hit a usage limit in {}: {error}\n{}[brigade] logs: {}\n",
+        "{}[brigade] {} hit a usage limit in {harness}: {error}\n\
+         [brigade] {harness}'s other agents usually share this limit, so don't retry or switch to another agent. \
+         Tell the user when it resets and let them choose what to do\n{}[brigade] logs: {}\n",
+        fell_back(record),
         record.agent.name,
-        record.agent.harness.product(),
         worktree_lines(record, worktree),
         logs.display()
     )
+}
+
+/// Says which agent a run started on when a usage limit made it switch, and
+/// when that agent's limit resets.
+fn fell_back(record: &RunRecord) -> String {
+    match &record.fell_back_from {
+        Some(from) => format!(
+            "[brigade] {} hit a usage limit in {}, so {} ran instead: {}\n",
+            from.agent,
+            from.harness.product(),
+            record.agent.name,
+            from.error
+        ),
+        None => String::new(),
+    }
 }
 
 pub fn cancelled(record: &RunRecord, reason: &str, logs: &Path, worktree: Option<&WorktreeState>) -> String {
     format!(
-        "[brigade] run {} was cancelled: {reason}\n{}[brigade] logs: {}\n",
+        "{}[brigade] run {} was cancelled: {reason}\n{}[brigade] logs: {}\n",
+        fell_back(record),
         record.id,
         worktree_lines(record, worktree),
         logs.display()
@@ -81,8 +104,15 @@ fn worktree_lines(record: &RunRecord, state: Option<&WorktreeState>) -> String {
     };
     let (path, branch) = (worktree.path.display(), &worktree.branch);
     let mut out = match state {
-        Some(WorktreeState::Committed { commit }) => {
-            format!("[brigade] its changes are committed as {commit} on branch {branch}, in worktree {path}\n")
+        Some(WorktreeState::Committed { commit, agent_branch }) => {
+            let mut out =
+                format!("[brigade] its changes are committed as {commit} on branch {branch}, in worktree {path}\n");
+            if let Some(own) = agent_branch {
+                out.push_str(&format!(
+                    "[brigade] the agent also made branch {own} at the same commit; delete it too once {branch} is merged\n"
+                ));
+            }
+            out
         }
         Some(WorktreeState::Unchanged) => {
             format!("[brigade] it changed nothing; its worktree {path} is on branch {branch}\n")
@@ -177,8 +207,12 @@ pub fn roster(entries: &[Entry], user_file: &Path) -> String {
             Source::BuiltIn => String::new(),
             Source::User => format!(", from {}", user_file.display()),
         };
+        let fallback = match &entry.fallback {
+            Some(fallback) => format!("; falls back to {fallback} on a usage limit"),
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "{} ({}, {}, {}{source}): {}\n",
+            "{} ({}, {}, {}{source}): {}{fallback}\n",
             agent.name,
             agent.harness,
             agent.model,

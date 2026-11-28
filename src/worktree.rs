@@ -30,6 +30,9 @@ pub struct Worktree {
 pub enum WorktreeState {
     Committed {
         commit: String,
+        /// A branch the agent made and committed on, which points at the same commit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_branch: Option<String>,
     },
     Unchanged,
     Uncommitted {
@@ -118,11 +121,29 @@ pub fn commit(worktree: &Worktree, message: &str) -> WorktreeState {
     }
     match git(&worktree.path, &["rev-parse", "HEAD"]) {
         Ok(head) if head.trim() == worktree.base => WorktreeState::Unchanged,
-        Ok(head) => WorktreeState::Committed {
-            commit: head.trim().chars().take(7).collect(),
+        Ok(head) => match reclaim_branch(worktree) {
+            Ok(agent_branch) => WorktreeState::Committed {
+                commit: head.trim().chars().take(7).collect(),
+                agent_branch,
+            },
+            Err(error) => WorktreeState::Uncommitted { error },
         },
         Err(error) => WorktreeState::Uncommitted { error },
     }
+}
+
+/// An agent may switch to a branch of its own (users' instructions often name
+/// a branch convention) and leave its commits there. The run's branch is moved
+/// to that commit and checked out again, so the branch the reply names has the
+/// work. Returns the agent's branch, if it made one.
+fn reclaim_branch(worktree: &Worktree) -> Result<Option<String>, String> {
+    let current = git(&worktree.path, &["branch", "--show-current"])?.trim().to_string();
+    if current == worktree.branch {
+        return Ok(None);
+    }
+    git(&worktree.path, &["branch", "--force", &worktree.branch, "HEAD"])?;
+    git(&worktree.path, &["checkout", "--quiet", &worktree.branch])?;
+    Ok((!current.is_empty()).then_some(current))
 }
 
 /// After a run failed or was cancelled: removes its worktree and branch if the

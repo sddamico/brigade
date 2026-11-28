@@ -19,7 +19,7 @@ brigade is two pieces:
 - A CLI, `brigade`, that runs a task on a roster agent headless (`claude -p`, `codex exec`, `agy -p`) and prints its final reply, plus a session id to continue it with
 - A plugin for all three harnesses. It has a skill that teaches the host agent the roster and how to start agents, and a subagent definition per agent in each harness's own format
 
-brigade only stands in for agents that live in another CLI. An agent from the host's own family stays on the host's ordinary subagents: opus in Claude Code is the Agent tool with `model: "opus"`, and sol in Codex is `spawn_agent` with `model: "gpt-6.2-sol"`. Every other agent gets a forwarder, a subagent on the host's cheapest model that hands the task to `brigade run` and returns the reply unchanged.
+brigade only stands in for agents that live in another CLI. An agent from the host's own family stays on the host's ordinary subagents: opus in Claude Code is the Agent tool with `model: "opus"`, and sol in Codex is `spawn_agent` with `model: "gpt-6.2-sol"`. Every other agent gets a forwarder, a subagent on a small model of the host's that hands the task to `brigade run` and returns the reply unchanged.
 
 | Host | Its own agents (no brigade) | Through a brigade forwarder |
 |---|---|---|
@@ -36,9 +36,9 @@ Runs are read-only unless asked to write, and use the agent's model at the harne
 The CLI, with cargo or mise:
 
 ```sh
-cargo install --git https://github.com/sddamico/brigade --tag v0.3.1
+cargo install --git https://github.com/sddamico/brigade --tag v0.3.2
 # or, in ~/.config/mise/config.toml:
-# "cargo:https://github.com/sddamico/brigade" = "tag:v0.3.1"
+# "cargo:https://github.com/sddamico/brigade" = "tag:v0.3.2"
 ```
 
 The plugin, from this repo's marketplace:
@@ -50,13 +50,13 @@ claude plugin install brigade@brigade
 codex plugin marketplace add https://github.com/sddamico/brigade.git
 codex plugin add brigade@brigade
 
-agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.3.1
+agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.3.2
 ```
 
 Codex plugins can't ship subagent roles, so link the roles from Codex's copy of the plugin into `~/.codex/agents`, which Codex searches recursively. Re-point it after a plugin update:
 
 ```sh
-ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.3.1/codex/agents ~/.codex/agents/brigade
+ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.3.2/codex/agents ~/.codex/agents/brigade
 ```
 
 Each agent needs its harness's CLI installed and logged in.
@@ -76,6 +76,7 @@ EOF
 brigade run neon --write --worktree "add a --json flag to the export command"
 brigade run sol --model gpt-6.1-sol --effort high "same question, previous Sol"
 brigade run sol --resume <session> --cwd <dir> "now add a regression test"
+brigade run sol --fallback opus "review this diff"   # opus takes over if sol hits its usage limit
 
 id=$(brigade run hydrogen --detach "audit the error handling in src/" | awk '{print $4}')
 brigade wait "$id" --timeout 100
@@ -107,6 +108,17 @@ CLAUDE_CODE_MAX_CONTEXT_TOKENS = "196608"
 ```
 
 User agents don't get a subagent of their own; the generic `forward` subagent runs them in every harness.
+
+A `[fallbacks]` table names the agent a run switches to when its agent hits a usage limit. The fallback gets the same task and reports the switch. Pick one from another harness: an agent's siblings in the same CLI usually share its account's limit.
+
+```toml
+[fallbacks]
+sol = "opus"
+astra = "opus"
+opus = "sol"
+```
+
+A run follows at most one fallback, so two agents can fall back to each other. `--fallback <agent>` picks one for a single run and `--no-fallback` turns it off.
 
 ## Development
 
