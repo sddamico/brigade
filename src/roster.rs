@@ -820,17 +820,17 @@ mod tests {
             max_runs = 2
 
             [[account.agent]]
-            name = "claude-local"
+            name = "lab-claude"
             harness = "claude"
-            model = "$LOCAL_MODEL"
+            model = "$LAB_MODEL"
             effort = "medium"
             description = "Claude Code on a local model"
-            env = { ANTHROPIC_BASE_URL = "$LOCAL_MODEL_SERVER" }
+            env = { ANTHROPIC_BASE_URL = "$LAB_SERVER" }
 
             [[account.agent]]
-            name = "codex-local"
+            name = "lab-codex"
             harness = "codex"
-            model = "$LOCAL_MODEL"
+            model = "$LAB_MODEL"
             description = "Codex on a local model"
             "#,
         );
@@ -839,11 +839,11 @@ mod tests {
             roster.get("sonnet").is_none(),
             "the user's claude account leaves sonnet out"
         );
-        let local = roster.get("claude-local").unwrap();
+        let local = roster.get("lab-claude").unwrap();
         assert_eq!(local.source, Source::User);
-        assert_eq!(local.agent.env["ANTHROPIC_BASE_URL"], "$LOCAL_MODEL_SERVER");
+        assert_eq!(local.agent.env["ANTHROPIC_BASE_URL"], "$LAB_SERVER");
         assert_eq!(local.agent.account.max_runs, Some(2));
-        assert_eq!(roster.get("codex-local").unwrap().agent.account.name, "local");
+        assert_eq!(roster.get("lab-codex").unwrap().agent.account.name, "local");
         assert_eq!(roster.get("sol").unwrap().source, Source::BuiltIn);
     }
 

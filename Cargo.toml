@@ -1,6 +1,6 @@
 [package]
 name = "brigade"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 description = "Tag in named agents (sol, neon, opus...) that run in their own CLI from Claude Code, Codex or Antigravity"
 license = "MIT"

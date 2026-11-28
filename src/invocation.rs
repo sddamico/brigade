@@ -451,10 +451,10 @@ mod tests {
     #[test]
     fn claude_read_only_removes_the_edit_tools_alongside_agent_args() {
         let mut a = agent(Harness::Claude, "opus");
-        a.args = vec!["--disallowedTools".into(), "Artifact".into()];
+        a.args = vec!["--disallowedTools".into(), "WebSearch".into()];
         let inv = invocation(&a, Access::ReadOnly, Some("s-1"));
         assert!(has_pair(&inv.args, "--disallowedTools", CLAUDE_EDIT_TOOLS));
-        assert!(has_pair(&inv.args, "--disallowedTools", "Artifact"));
+        assert!(has_pair(&inv.args, "--disallowedTools", "WebSearch"));
         assert!(has_pair(&inv.args, "--resume", "s-1"));
         assert!(inv.stdin.ends_with("do it"));
     }
@@ -480,9 +480,8 @@ mod tests {
 
     #[test]
     fn agent_model_env_and_args_expand_variables() {
-        let mut a = agent(Harness::Claude, "$LOCAL_MODEL");
-        a.env
-            .insert("ANTHROPIC_BASE_URL".into(), "${LOCAL_MODEL_SERVER}/v1".into());
+        let mut a = agent(Harness::Claude, "$LAB_MODEL");
+        a.env.insert("ANTHROPIC_BASE_URL".into(), "${LAB_SERVER}/v1".into());
         let req = Request {
             agent: &a,
             model: &a.model,
@@ -495,8 +494,8 @@ mod tests {
             worktree: None,
         };
         let vars = |name: &str| match name {
-            "LOCAL_MODEL" => Some("local".to_string()),
-            "LOCAL_MODEL_SERVER" => Some("http://box:8787".to_string()),
+            "LAB_MODEL" => Some("local".to_string()),
+            "LAB_SERVER" => Some("http://box:8787".to_string()),
             _ => None,
         };
         let inv = build(&req, &vars).unwrap();
@@ -506,7 +505,7 @@ mod tests {
             vec![("ANTHROPIC_BASE_URL".to_string(), "http://box:8787/v1".to_string())]
         );
 
-        assert_eq!(build(&req, &|_| None), Err(UnsetVar("LOCAL_MODEL".into())));
+        assert_eq!(build(&req, &|_| None), Err(UnsetVar("LAB_MODEL".into())));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 name: brigade
-description: Tag in a named agent from the brigade roster (opus, fable, sonnet, sol, astra, neon, hydrogen, or one from the user's own roster such as claude-local), each running in its own CLI (Claude Code, Codex or Antigravity), alone or as a team. Use when the user asks to spin up, ask, tag in or send a named agent ("spin up a sol subagent", "have opus review this", "use a team of neon subagents", "get claude-local to try it"), or asks which agents brigade has.
+description: Tag in a named agent from the brigade roster (opus, fable, sonnet, sol, astra, neon, hydrogen, or one from the user's own roster), each running in its own CLI (Claude Code, Codex or Antigravity), alone or as a team. Use when the user asks to spin up, ask, tag in or send a named agent ("spin up a sol subagent", "have opus review this", "use a team of neon subagents"), or asks which agents brigade has.
 ---
 
 # brigade
@@ -35,7 +35,7 @@ An agent from your own harness's family runs on your ordinary subagents; brigade
 
 - opus, fable and sonnet: use the Agent tool as usual, with `model: "opus"` (or `fable`, `sonnet`) and `effort` if one was asked for
 - sol, astra, neon and hydrogen: `Agent(subagent_type: "brigade:<name>")`, a forwarder that runs the agent's own CLI. Put the routing in the prompt in plain words: "this is a write run", "use model `<id>`", "use effort high", "use your own worktree", or "continue session `<id>` in `<dir>`". Don't set `isolation` on a forwarder's Agent call: ask for a worktree in the prompt and brigade makes it
-- An agent from the user's roster, such as claude-local: its own subagent, `Agent(subagent_type: "claude-local")`, once the user has run `brigade install-agents`. Otherwise `brigade:forward`, with `agent: <name>` as the first line of the prompt
+- An agent from the user's roster: its own subagent, `Agent(subagent_type: "<name>")`, once the user has run `brigade install-agents`. Otherwise `brigade:forward`, with `agent: <name>` as the first line of the prompt
 
 ### In Codex
 

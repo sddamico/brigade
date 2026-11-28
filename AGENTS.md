@@ -16,6 +16,10 @@ A Rust CLI (`src/`) plus a plugin for Claude Code, Codex and agy (`plugin/`). Th
 - `src/render.rs`: renders everything under `plugin/` (and `.claude-plugin/marketplace.json`) from the roster. A host only gets forwarders for agents from other harnesses; its own family stays on its ordinary subagents
 - `plugin/skills/brigade/SKILL.md`: hand-written, except the roster table between the markers
 
+## Open source
+
+brigade is public and meant for anyone's setup. Nothing in the code, plugin text, docs or tests may assume one user's machine: no hostnames or addresses, no names of someone's own agents, local models, environment variables or tools. Whatever a setup needs goes through the roster (accounts, catalog entries, custom harnesses, `models_url`, `[[served_model]]`), and examples use placeholders (`$MY_MODEL_SERVER`, `example-model-30b`). A user's own values live in their own roster file.
+
 ## Workflow
 
 - After changing `roster.toml`, `src/render.rs`, the skill or the version, run `cargo run --example generate` and commit the result. `cargo test` fails while `plugin/` is stale

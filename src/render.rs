@@ -319,8 +319,8 @@ fn own_family<'a>(host: &Harness, agents: &[&'a Agent]) -> Vec<&'a str> {
 
 fn forward_description(host: &Harness, agents: &[&Agent]) -> String {
     let mut description = "Hands a task to a brigade agent that has no subagent of its own here, such as one from \
-        the user's roster (~/.config/brigade/roster.toml), e.g. claude-local. Start the prompt with \
-        `agent: <name>`; `brigade list` shows the roster."
+        the user's roster (~/.config/brigade/roster.toml). Start the prompt with `agent: <name>`; \
+        `brigade list` shows the roster."
         .to_string();
     match native_family(host, agents) {
         Some((names, how)) => {
@@ -358,8 +358,8 @@ fn forwarder_body(agent: Option<&Agent>, host: &Harness, agents: &[&Agent], shel
         }
         None => {
             let mut intro = "You hand one task to a brigade roster agent and pass back its reply. The request names \
-                the agent on a line like `agent: claude-local`; run `brigade list` if it isn't clear which roster \
-                agent is meant."
+                the agent on a line like `agent: <name>`; run `brigade list` if it isn't clear which roster agent \
+                is meant."
                 .to_string();
             if let Some((names, how)) = native_family(host, agents) {
                 intro.push_str(&format!(

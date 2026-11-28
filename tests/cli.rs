@@ -240,32 +240,32 @@ fn user_roster_agents_get_their_env_expanded() {
         name = "local"
 
         [[account.agent]]
-        name = "claude-local"
+        name = "lab-claude"
         harness = "claude"
         model = "local"
         effort = "medium"
         description = "Claude Code on a local model"
-        env = { ANTHROPIC_BASE_URL = "$LOCAL_MODEL_SERVER" }
+        env = { ANTHROPIC_BASE_URL = "$LAB_SERVER" }
         "#,
     );
 
     let listed = stdout(&sandbox.brigade(&["list"]));
     assert!(
-        listed.contains("claude-local\n  local account: Claude Code on a local model (local, effort medium, from "),
+        listed.contains("lab-claude\n  local account: Claude Code on a local model (local, effort medium, from "),
         "{listed}"
     );
 
-    let unset = sandbox.brigade(&["run", "claude-local", "hello"]);
+    let unset = sandbox.brigade(&["run", "lab-claude", "hello"]);
     assert!(!unset.status.success());
     assert!(
-        stderr(&unset).contains("`claude-local` needs $LOCAL_MODEL_SERVER, which isn't set"),
+        stderr(&unset).contains("`lab-claude` needs $LAB_SERVER, which isn't set"),
         "{}",
         stderr(&unset)
     );
 
     let output = sandbox
-        .command(&["run", "claude-local", "hello"])
-        .env("LOCAL_MODEL_SERVER", "http://box:8787")
+        .command(&["run", "lab-claude", "hello"])
+        .env("LAB_SERVER", "http://box:8787")
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", stderr(&output));
@@ -877,7 +877,7 @@ models = { codex = "gpt-6.1-sol" }
 name = "local"
 
 [[account.agent]]
-name = "claude-local"
+name = "lab-claude"
 harness = "claude"
 model = "local"
 description = "Claude Code on the local model"
@@ -891,22 +891,22 @@ description = "Claude Code on the local model"
     let installed = sandbox.brigade(&["install-agents"]);
     assert!(installed.status.success(), "{}", stderr(&installed));
     let files = [
-        ".claude/agents/claude-local.md",
-        ".codex/agents/claude-local.toml",
-        ".gemini/config/agents/claude-local.md",
+        ".claude/agents/lab-claude.md",
+        ".codex/agents/lab-claude.toml",
+        ".gemini/config/agents/lab-claude.md",
     ];
     for file in files {
         let text = fs::read_to_string(home.join(file)).unwrap();
-        assert!(text.contains("brigade run claude-local"), "{file}: {text}");
+        assert!(text.contains("brigade run lab-claude"), "{file}: {text}");
     }
     let claude = fs::read_to_string(home.join(files[0])).unwrap();
     assert!(
         claude.starts_with("---\n# Written by `brigade install-agents`"),
         "{claude}"
     );
-    assert!(claude.contains("\nname: claude-local\n"), "{claude}");
+    assert!(claude.contains("\nname: lab-claude\n"), "{claude}");
     let codex: toml::Value = toml::from_str(&fs::read_to_string(home.join(files[1])).unwrap()).unwrap();
-    assert_eq!(codex["name"].as_str(), Some("claude-local"));
+    assert_eq!(codex["name"].as_str(), Some("lab-claude"));
     assert!(
         !home.join(".claude/agents/sol.md").exists(),
         "a replaced built-in keeps the plugin's forwarder"
@@ -1401,16 +1401,16 @@ fn refresh_reads_quotas_and_a_used_up_one_holds_runs_back() {
 fn a_local_agent_takes_the_benchmark_of_the_model_its_server_serves() {
     let sandbox = Sandbox::new();
     let models = sandbox.root().join("models.json");
-    fs::write(&models, r#"{"data":[{"id":"qwen3.8-flash-next","object":"model"}]}"#).unwrap();
+    fs::write(&models, r#"{"data":[{"id":"lab-model-a","object":"model"}]}"#).unwrap();
     sandbox.user_roster(&format!(
         r#"
 [benchmark_sources.aa-local]
 name = "Artificial Analysis, full-precision weights"
-url = "https://artificialanalysis.ai/models/qwen3-8-flash-next"
+url = "https://artificialanalysis.ai/models/lab-model-a"
 read = "2026-11-27"
 
 [[served_model]]
-id = "qwen3.8-flash-next"
+id = "lab-model-a"
 best_for = "private, simple or high-volume work"
 benchmark = {{ source = "aa-local", intelligence = 28 }}
 
@@ -1419,7 +1419,7 @@ name = "local"
 models_url = "file://{}"
 
 [[account.agent]]
-name = "claude-local"
+name = "lab-claude"
 harness = "claude"
 model = "local"
 description = "Claude Code on the local model"
@@ -1429,13 +1429,13 @@ description = "Claude Code on the local model"
 
     let before = stdout(&sandbox.brigade(&["list"]));
     assert!(
-        before.contains("claude-local\n  local account:"),
+        before.contains("lab-claude\n  local account:"),
         "nothing known before a refresh: {before}"
     );
 
     let refreshed = sandbox.brigade(&["capacity", "--refresh"]);
     assert!(
-        stdout(&refreshed).contains("local (claude-local): free, 0 running, serving qwen3.8-flash-next"),
+        stdout(&refreshed).contains("local (lab-claude): free, 0 running, serving lab-model-a"),
         "{}",
         stdout(&refreshed)
     );
@@ -1445,32 +1445,32 @@ description = "Claude Code on the local model"
         "{listed}"
     );
     assert!(
-        listed.contains("claude-local: Best for private, simple or high-volume work. Scores 28 (aa-local).\n"),
+        listed.contains("lab-claude: Best for private, simple or high-volume work. Scores 28 (aa-local).\n"),
         "{listed}"
     );
     assert!(
         listed.contains("(local, the harness's default effort, from "),
         "{listed}"
     );
-    assert!(listed.contains(", serving qwen3.8-flash-next)"), "{listed}");
+    assert!(listed.contains(", serving lab-model-a)"), "{listed}");
     let json: serde_json::Value = serde_json::from_str(&stdout(&sandbox.brigade(&["list", "--json"]))).unwrap();
     let local = json
         .as_array()
         .unwrap()
         .iter()
-        .find(|r| r["name"] == "claude-local")
+        .find(|r| r["name"] == "lab-claude")
         .unwrap();
     assert_eq!(local["served_model"]["benchmark"]["intelligence"], 28.0);
     assert_eq!(local["served_model"]["benchmark"]["source"]["key"], "aa-local");
 
-    fs::write(&models, r#"{"data":[{"id":"ornith-1.0-9b"}]}"#).unwrap();
+    fs::write(&models, r#"{"data":[{"id":"lab-model-b"}]}"#).unwrap();
     sandbox.brigade(&["capacity", "--refresh"]);
     let switched = stdout(&sandbox.brigade(&["list"]));
     assert!(
-        switched.contains("claude-local\n"),
+        switched.contains("lab-claude\n"),
         "a model with no entry says nothing: {switched}"
     );
-    assert!(switched.contains(", serving ornith-1.0-9b)"), "{switched}");
+    assert!(switched.contains(", serving lab-model-b)"), "{switched}");
 }
 
 #[test]
