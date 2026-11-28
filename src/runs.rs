@@ -943,14 +943,23 @@ fn commit_message(record: &RunRecord, task: &str) -> String {
 /// The task's first line of words (not a code fence or a rule), cut at a word
 /// to fit 72 characters.
 fn subject(task: &str) -> String {
-    let fence = |l: &str| l.trim_start().starts_with("```") || l.trim_start().starts_with("~~~");
-    let words = |l: &&str| !fence(l) && l.chars().any(char::is_alphanumeric);
-    let mut in_block = false;
+    // A fence's character and length: "```" or "~~~", three or more.
+    let fence = |l: &str| {
+        let l = l.trim_start();
+        let mark = l.chars().next().filter(|c| *c == '`' || *c == '~')?;
+        let len = l.chars().take_while(|c| *c == mark).count();
+        (len >= 3).then_some((mark, len))
+    };
+    let words = |l: &&str| fence(l).is_none() && l.chars().any(char::is_alphanumeric);
+    // A block closes only on a fence of its own character, at least as long.
+    let mut open: Option<(char, usize)> = None;
     let prose = task.lines().find(|l| {
-        if fence(l) {
-            in_block = !in_block;
+        match (open, fence(l)) {
+            (None, Some(opening)) => open = Some(opening),
+            (Some((mark, len)), Some((m, n))) if m == mark && n >= len => open = None,
+            _ => {}
         }
-        !in_block && words(l)
+        open.is_none() && words(l)
     });
     // A task that is all code takes its first line of code.
     let line = prose.or_else(|| task.lines().find(words)).unwrap_or("").trim();
@@ -1076,6 +1085,8 @@ mod tests {
             "Add a main function"
         );
         assert_eq!(subject("~~~\ncode only\n~~~"), "code only");
+        assert_eq!(subject("~~~md\n```\ninside\n~~~\nProse after"), "Prose after");
+        assert_eq!(subject("````\n```\nnested\n````\nAfter"), "After");
         let words = format!("{} yyyy zzzz more", "x".repeat(66));
         assert_eq!(subject(&words), format!("{} yyyy…", "x".repeat(66)));
         let split = format!("{} yyyyyy zzzz", "x".repeat(66));
