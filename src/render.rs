@@ -331,7 +331,7 @@ fn forward_description(host: &Harness, agents: &[&Agent]) -> String {
             if !names.is_empty() {
                 description.push_str(&format!(
                     " Also for {} when this session runs on another model.",
-                    names.join(" or ")
+                    crate::report::listing(&names, "or")
                 ));
             }
         }
@@ -370,7 +370,7 @@ fn forwarder_body(agent: Option<&Agent>, host: &Harness, agents: &[&Agent], shel
                 intro.push_str(&format!(
                     " If the agent is {}, don't run anything: reply that it runs as an ordinary {} subagent, on {how}, \
                      and stop.",
-                    names.join(" or "),
+                    crate::report::listing(&names, "or"),
                     host.product(),
                 ));
             }

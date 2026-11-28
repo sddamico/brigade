@@ -73,6 +73,16 @@ fn harness_session(record: &RunRecord) -> String {
     }
 }
 
+/// Words as an English list: "a", "a and b", "a, b and c" with `last` as the
+/// final joiner.
+pub fn listing(words: &[&str], last: &str) -> String {
+    match words {
+        [] => String::new(),
+        [only] => only.to_string(),
+        [rest @ .., final_word] => format!("{} {last} {final_word}", rest.join(", ")),
+    }
+}
+
 /// Quoted for a POSIX shell when it needs to be, so a printed command can be
 /// run as it stands.
 pub fn shell_quote(word: &str) -> String {
@@ -548,7 +558,18 @@ fn age(secs: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_quote;
+    use super::{listing, shell_quote};
+
+    #[test]
+    fn listing_joins_the_last_word_with_its_own_joiner() {
+        assert_eq!(listing(&["claude"], "and"), "claude");
+        assert_eq!(listing(&["claude", "agy"], "and"), "claude and agy");
+        assert_eq!(
+            listing(&["claude", "agy", "claude-work"], "and"),
+            "claude, agy and claude-work"
+        );
+        assert_eq!(listing(&["opus", "fable", "sonnet"], "or"), "opus, fable or sonnet");
+    }
 
     #[test]
     fn shell_quote_leaves_plain_paths_and_quotes_the_rest() {

@@ -335,7 +335,7 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         return Err(format!(
             "{} is offered by the {} accounts; say which one the session is on with --account",
             args.agent,
-            accounts.join(" and ")
+            report::listing(&accounts, "and")
         ));
     }
     // A chosen model, or a session to continue, belongs to one route's harness.
