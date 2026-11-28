@@ -302,6 +302,21 @@ pub fn parse(
 
 /// The harness's latest word on its account's usage. Only Claude Code reports
 /// it with every run, in its stream's `rate_limit_event`.
+/// The session the harness reported, whether or not the run succeeded, so a
+/// failed or limited run's conversation can still be found.
+pub fn session(harness: &Harness, stdout: &str) -> Option<String> {
+    match harness {
+        Harness::Custom(custom) => custom::session(custom, stdout),
+        Harness::Claude => events(stdout).find_map(|v| v["session_id"].as_str().map(String::from)),
+        Harness::Codex => events(stdout)
+            .find(|v| v["type"] == "thread.started")
+            .and_then(|v| v["thread_id"].as_str().map(String::from)),
+        Harness::Agy => serde_json::from_str::<Value>(stdout.trim())
+            .ok()
+            .and_then(|v| v["conversation_id"].as_str().map(String::from)),
+    }
+}
+
 pub fn usage(harness: &Harness, stdout: &str) -> Option<Usage> {
     if *harness != Harness::Claude {
         return None;

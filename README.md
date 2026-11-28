@@ -36,9 +36,9 @@ Runs are read-only unless asked to write, and use the agent's model at the harne
 The CLI, with cargo or mise:
 
 ```sh
-cargo install --git https://github.com/sddamico/brigade --tag v0.8.1
+cargo install --git https://github.com/sddamico/brigade --tag v0.9.0
 # or, in ~/.config/mise/config.toml:
-# "cargo:https://github.com/sddamico/brigade" = "tag:v0.8.1"
+# "cargo:https://github.com/sddamico/brigade" = "tag:v0.9.0"
 ```
 
 The plugin, from this repo's marketplace:
@@ -50,13 +50,13 @@ claude plugin install brigade@brigade
 codex plugin marketplace add https://github.com/sddamico/brigade.git
 codex plugin add brigade@brigade
 
-agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.8.1
+agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.9.0
 ```
 
 Codex plugins can't ship subagent roles, so link the roles from Codex's copy of the plugin into `~/.codex/agents`, which Codex searches recursively. Re-point it after a plugin update:
 
 ```sh
-ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.8.1/codex/agents ~/.codex/agents/brigade
+ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.9.0/codex/agents ~/.codex/agents/brigade
 ```
 
 Each agent needs its harness's CLI installed and logged in.
@@ -85,7 +85,13 @@ brigade cancel "$id"
 
 Each reply ends with `[brigade]` lines naming the run, and for a session the command that continues it. A run that hits its harness's usage limit says so in a `[brigade] <agent> hit a usage limit` line, with when the account frees up, and exits with 4 rather than 1.
 
-Every run belongs to whoever waits on it. `brigade wait` and a foreground `brigade run` renew the run's lease while they wait; a run nobody has waited on for 90 seconds is cancelled, along with everything its harness started. So stopping a forwarder subagent, or the session it was in, stops the agent it started. Ctrl-C on a foreground run and `brigade cancel <run id>` stop one at once.
+Every run belongs to whoever waits on it. `brigade wait` and a foreground `brigade run` renew the run's lease while they wait; a run nobody has waited on for 90 seconds is cancelled, along with everything its harness started. So stopping a forwarder subagent, or the session it was in, stops the agent it started. Ctrl-C, SIGTERM or closing the terminal on a foreground run, and `brigade cancel <run id>`, stop one at once. If brigade's own worker process dies, the next `brigade wait` stops what the harness left running and reports the run as failed.
+
+A run's directory under `$XDG_STATE_HOME/brigade/runs` (`~/.local/state/brigade/runs`) holds its task and the harness's whole output, readable only by you. Finished runs are deleted after a week; `brigade runs --prune` deletes them all now.
+
+A write run in a worktree commits its changes with the task's first line as the subject. A read-only run never commits, even inside a worktree.
+
+brigade can't start a run from inside a host's sandbox, since the agent's CLI needs the network and its own config. Its forwarders ask to run outside it: with `BypassSandbox` in agy, and with `sandbox_permissions: "require_escalated"` in Codex, which asks you to approve it unless your approval settings already allow `brigade`.
 
 ## Accounts and routes
 
@@ -130,7 +136,7 @@ env = { ANTHROPIC_BASE_URL = "$MY_MODEL_SERVER" }
 
 An agent more than one account offers has a route through each. `brigade run opus` takes the first route with capacity, in account order: built-in accounts first, a user account that replaces one keeping its place, then the user's others. A route that's limited or full is passed over without spending a call, and a run that hits a limit moves to the next route. `--account <account>` pins a route. `env` and `args` go to the harness's CLI, and `$VAR` and `${VAR}` expand from brigade's environment. Catalog entries of your own (`[[catalog]]`, as in [roster.toml](roster.toml)) add agents any account can opt into. `brigade list` shows every agent, what it's best for, its routes, and how its model scored on a benchmark: by default the Artificial Analysis Intelligence Index score, and the cost and minutes of one of its tasks. Each `benchmark = { source = "aa", ... }` names one of the roster's `[benchmark_sources]`, so your own figures stay labelled as yours.
 
-An account on a server that switches models, like a local one, names its model list with `models_url`. `brigade capacity --refresh` asks it which model is loaded, and the account's agents take that model's `[[served_model]]` entry, so switching models needs no roster edit:
+An account on a server that switches models, like a local one, names its model list with `models_url`. `brigade capacity --refresh` asks it which model is loaded, and the account's agents take that model's `[[served_model]]` entry, so switching models needs no roster edit. That takes a server that lists only the model it has loaded: when it lists several, as a router listing every model it can load does, the agents keep their own description. A failed read forgets what the server served before:
 
 ```toml
 [benchmark_sources.mine]

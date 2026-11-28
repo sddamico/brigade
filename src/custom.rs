@@ -250,6 +250,17 @@ pub fn parse(harness: &CustomHarness, stdout: &str, stderr: &str, succeeded: boo
     }
 }
 
+/// The session at the harness's `session` pointer, from whatever it printed.
+pub fn session(harness: &CustomHarness, stdout: &str) -> Option<String> {
+    let pointer = harness.output.session.as_deref()?;
+    let events: Vec<Value> = match harness.output.format {
+        OutputFormat::Text => return None,
+        OutputFormat::Json => vec![serde_json::from_str(stdout.trim()).ok()?],
+        OutputFormat::Jsonl => stdout.lines().filter_map(|l| serde_json::from_str(l).ok()).collect(),
+    };
+    events.iter().find_map(|v| v.pointer(pointer).and_then(text))
+}
+
 /// A JSON value as text; null, false and empty strings say nothing.
 fn text(value: &Value) -> Option<String> {
     match value {

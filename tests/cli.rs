@@ -14,6 +14,9 @@ log="$FAKE_LOG/$name"
 mkdir -p "$log"
 echo $$ > "$log/pid"
 echo call >> "$log/calls"
+session=claude-session
+prev=""
+for arg in "$@"; do [ "$prev" = --resume ] && session="$arg"; prev="$arg"; done
 : > "$log/args"
 for arg in "$@"; do printf '%s\n--\n' "$arg" >> "$log/args"; done
 if [ "$name" = codex ] && [ "$1" = app-server ]; then
@@ -61,7 +64,7 @@ esac
 case "$name" in
   claude)
     echo '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1900000000,"rateLimitType":"seven_day","unifiedWindows":{"seven_day":{"utilization":0.82,"resetsAt":1900000000,"status":"allowed_warning"}}}}'
-    echo '{"type":"result","subtype":"success","is_error":false,"result":"claude reply","session_id":"claude-session"}' ;;
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"claude reply","session_id":"%s"}\n' "$session" ;;
   codex)
     out=""; prev=""
     for arg in "$@"; do [ "$prev" = "-o" ] && out="$arg"; prev="$arg"; done
@@ -222,7 +225,7 @@ fn write_run_on_a_resumed_claude_session_takes_the_task_from_stdin() {
     let sandbox = Sandbox::new();
     let output = sandbox.brigade_with_stdin(&["run", "opus", "--write", "--resume", "s-0"], "apply the fix\n");
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stdout(&output).contains("--resume claude-session --cwd"));
+    assert!(stdout(&output).contains("--resume s-0 --cwd"));
     assert!(stdout(&output).contains(" --write\n"));
 
     let args = sandbox.args("claude");
@@ -489,8 +492,11 @@ fn a_write_run_in_a_worktree_commits_its_changes_on_its_branch() {
     );
     assert!(out.contains("[brigade] its changes are committed as "), "{out}");
     assert_eq!(
-        git_in(&work, &["log", "--format=%s", &format!("main..{branch}")]).trim(),
-        format!("brigade: hydrogen run {}", branch.trim_start_matches("brigade/"))
+        git_in(&work, &["log", "--format=%s%n%b", &format!("main..{branch}")]).trim(),
+        format!(
+            "build it\nbrigade run {}: hydrogen on the agy account",
+            branch.trim_start_matches("brigade/")
+        )
     );
     assert!(git_in(&worktree, &["status", "--porcelain"]).is_empty());
     assert!(!work.join("pkg/made.txt").exists(), "the main checkout was changed");
@@ -1471,6 +1477,27 @@ description = "Claude Code on the local model"
         "a model with no entry says nothing: {switched}"
     );
     assert!(switched.contains(", serving lab-model-b)"), "{switched}");
+
+    // A server listing several models doesn't say which one runs.
+    fs::write(&models, r#"{"data":[{"id":"lab-model-b"},{"id":"lab-model-a"}]}"#).unwrap();
+    sandbox.brigade(&["capacity", "--refresh"]);
+    let several = stdout(&sandbox.brigade(&["list"]));
+    assert!(several.contains("lab-claude\n"), "{several}");
+    assert!(several.contains(", serving lab-model-b, lab-model-a)"), "{several}");
+
+    // A failed read forgets what the server served before.
+    fs::write(&models, r#"{"data":[{"id":"lab-model-a"}]}"#).unwrap();
+    sandbox.brigade(&["capacity", "--refresh"]);
+    fs::remove_file(&models).unwrap();
+    let failed = sandbox.brigade(&["capacity", "--refresh"]);
+    assert!(
+        stderr(&failed).contains("couldn't read which models the local account serves: `curl` failed: curl: (37)"),
+        "{}",
+        stderr(&failed)
+    );
+    let forgotten = stdout(&sandbox.brigade(&["list"]));
+    assert!(forgotten.contains("lab-claude\n"), "{forgotten}");
+    assert!(!forgotten.contains("serving"), "{forgotten}");
 }
 
 #[test]
@@ -1532,10 +1559,244 @@ fn rosters_that_cant_work_are_refused() {
             "[benchmark_sources.mine]\nname = \"m\"\nurl = \"u\"\nread = \"yesterday\"\n",
             "benchmark source `mine` was read on `yesterday`",
         ),
+        (
+            "[benchmark_sources.mine]\nname = \"m\"\nurl = \"u\"\nread = \"2026-13-45\"\n",
+            "benchmark source `mine` was read on `2026-13-45`",
+        ),
+        (
+            "[benchmark_sources.mine]\nname = \"m\"\nurl = \"u\"\nread = \"2026-11-27\"\n\n[[served_model]]\nid = \"m-1\"\nbenchmark = { source = \"mine\", intelligence = 101 }\n",
+            "served model `m-1` scores 101, outside 0 to 100",
+        ),
     ] {
         sandbox.user_roster(roster);
         let listed = sandbox.brigade(&["list"]);
         assert!(!listed.status.success(), "{roster}");
         assert!(stderr(&listed).contains(problem), "{}", stderr(&listed));
     }
+}
+
+#[test]
+fn a_read_only_run_inside_a_worktree_leaves_its_changes_uncommitted() {
+    let sandbox = Sandbox::new();
+    sandbox.repo();
+    let first = sandbox
+        .command(&["run", "hydrogen", "--write", "--worktree", "start"])
+        .env("FAKE_WRITE", "made.txt")
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{}", stderr(&first));
+    let worktree = PathBuf::from(sandbox.call("agy", "cwd").trim());
+    let head = git_in(&worktree, &["rev-parse", "HEAD"]);
+    fs::write(worktree.join("draft.txt"), "in progress\n").unwrap();
+
+    let review = sandbox
+        .command(&["run", "hydrogen", "review", "it"])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    assert!(review.status.success(), "{}", stderr(&review));
+    assert_eq!(git_in(&worktree, &["rev-parse", "HEAD"]), head);
+    assert!(git_in(&worktree, &["status", "--porcelain"]).contains("draft.txt"));
+}
+
+#[test]
+fn words_in_the_task_that_look_like_options_stay_words() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.brigade(&["run", "sol", "explain", "the", "--write", "flag"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let args = sandbox.args("codex");
+    assert!(args.windows(2).any(|w| w == ["-s", "read-only"]), "{args:?}");
+    assert!(sandbox.call("codex", "stdin").ends_with("explain the --write flag"));
+}
+
+#[test]
+fn a_resume_that_comes_back_as_a_new_session_fails() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.brigade(&["run", "neon", "--resume", "conv-gone", "carry", "on"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("didn't continue session conv-gone; it started session agy-conversation instead"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn the_continue_line_quotes_a_cwd_with_spaces() {
+    let sandbox = Sandbox::new();
+    let dir = sandbox.work().join("my project");
+    fs::create_dir_all(&dir).unwrap();
+    let output = sandbox.brigade(&["run", "opus", "--cwd", dir.to_str().unwrap(), "look"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains(&format!("--cwd '{}'", dir.display())),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_cwd_that_is_a_file_is_refused_before_anything_runs() {
+    let sandbox = Sandbox::new();
+    let file = sandbox.work().join("notes.txt");
+    fs::write(&file, "x").unwrap();
+    let output = sandbox.brigade(&["run", "opus", "--cwd", file.to_str().unwrap(), "look"]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("it isn't a directory"), "{}", stderr(&output));
+    assert!(!sandbox.root().join("calls/claude").exists());
+}
+
+#[test]
+fn a_failed_run_still_names_the_session_its_harness_started() {
+    let sandbox = Sandbox::new();
+    let output = sandbox
+        .command(&["run", "sol", "job"])
+        .env("FAKE_LIMIT", "codex")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    assert!(
+        stderr(&output).contains("[brigade] its Codex session is codex-thread"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_run_that_falls_back_keeps_each_harnesss_logs() {
+    let sandbox = Sandbox::new();
+    sandbox.user_roster("[[account]]\nname = \"agy\"\nharness = \"agy\"\nagents = [\"neon\", \"opus\"]\n");
+    let output = sandbox
+        .command(&["run", "opus", "--json", "job"])
+        .env("FAKE_LIMIT", "claude")
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "done", "{value}");
+    let dir = sandbox
+        .root()
+        .join("state/brigade/runs")
+        .join(value["run"]["id"].as_str().unwrap());
+    assert!(
+        fs::read_to_string(dir.join("stdout.1.log"))
+            .unwrap()
+            .contains("rate_limit")
+    );
+    assert!(
+        fs::read_to_string(dir.join("stdout.log"))
+            .unwrap()
+            .contains("agy reply")
+    );
+}
+
+#[test]
+fn cancelling_a_finished_run_says_so() {
+    let sandbox = Sandbox::new();
+    let done = sandbox.brigade(&["run", "opus", "--json", "job"]);
+    let value: serde_json::Value = serde_json::from_slice(&done.stdout).unwrap();
+    let id = value["run"]["id"].as_str().unwrap();
+    let output = sandbox.brigade(&["cancel", id]);
+    assert!(
+        stderr(&output).contains("had already finished, so there was nothing to cancel"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(stdout(&output).starts_with("claude reply"));
+}
+
+#[test]
+fn prune_deletes_finished_runs_and_run_dirs_are_private() {
+    let sandbox = Sandbox::new();
+    assert!(sandbox.brigade(&["run", "opus", "job"]).status.success());
+    let runs = sandbox.root().join("state/brigade/runs");
+    let dir = fs::read_dir(&runs).unwrap().next().unwrap().unwrap().path();
+    assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+
+    let output = sandbox.brigade(&["runs", "--prune"]);
+    assert_eq!(stdout(&output), "deleted 1 finished run(s)\n");
+    assert_eq!(fs::read_dir(&runs).unwrap().count(), 0);
+}
+
+#[test]
+fn a_sigterm_or_a_closed_terminal_cancels_a_foreground_run() {
+    for signal in [libc::SIGTERM, libc::SIGHUP] {
+        let sandbox = Sandbox::new();
+        let child = sandbox
+            .command(&["run", "opus", "job"])
+            .env("FAKE_SLEEP", "30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let harness = sandbox.harness_pid("claude");
+        unsafe {
+            libc::kill(child.id() as i32, signal);
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            stderr(&output).contains("was cancelled: interrupted"),
+            "{}",
+            stderr(&output)
+        );
+        assert!(!is_alive(harness), "the harness outlived signal {signal}");
+    }
+}
+
+#[test]
+fn a_run_whose_worker_died_has_what_it_left_running_stopped() {
+    let sandbox = Sandbox::new();
+    let started = sandbox
+        .command(&["run", "astra", "--detach", "job"])
+        .env("FAKE_SLEEP", "30")
+        .env("FAKE_DETACHED_CHILD", "1")
+        .output()
+        .unwrap();
+    let id = run_id(&stdout(&started));
+    let dir = sandbox.root().join("state/brigade/runs").join(&id);
+    let child_file = sandbox.root().join("calls/codex/detached-child");
+    // Waits for the worker to save a process tree that has the detached child in it.
+    let mut detached = None;
+    for _ in 0..100 {
+        let child = fs::read_to_string(&child_file)
+            .ok()
+            .and_then(|p| p.trim().parse::<i32>().ok());
+        let tree = fs::read_to_string(dir.join("tree.json")).unwrap_or_default();
+        if let Some(pid) = child.filter(|pid| tree.contains(&format!("[{pid},"))) {
+            detached = Some(pid);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let detached = detached.expect("the worker saved the detached child in its tree");
+    let worker: i32 = fs::read_to_string(dir.join("pid")).unwrap().trim().parse().unwrap();
+    unsafe {
+        libc::kill(worker, libc::SIGKILL);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(is_alive(detached));
+
+    let waited = sandbox.brigade(&["wait", &id]);
+    assert!(
+        stderr(&waited).contains("brigade's worker process died before the run finished"),
+        "{}",
+        stderr(&waited)
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !is_alive(detached),
+        "a command the harness started outlived its dead worker"
+    );
+}
+
+#[test]
+fn a_run_inside_codexs_sandbox_is_refused_with_how_to_get_out() {
+    let sandbox = Sandbox::new();
+    let output = sandbox
+        .command(&["run", "opus", "job"])
+        .env("CODEX_SANDBOX_NETWORK_DISABLED", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("require_escalated"), "{}", stderr(&output));
+    assert!(!sandbox.root().join("calls/claude").exists());
 }

@@ -77,7 +77,7 @@ fn output(command: &mut Command) -> Result<String, String> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("can't run `{program}`: {e}"))?;
     let deadline = Instant::now() + READ_TIMEOUT;
@@ -97,7 +97,17 @@ fn output(command: &mut Command) -> Result<String, String> {
     let output = child
         .wait_with_output()
         .map_err(|e| format!("can't read `{program}`: {e}"))?;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.status.success() && stdout.trim().is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let said = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("no output");
+        return Err(format!("`{program}` failed: {}", said.trim()));
+    }
+    Ok(stdout)
 }
 
 /// Claude Code's `/usage` text: "Current week (all models): 37% used · resets

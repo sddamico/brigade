@@ -256,9 +256,16 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
+        // The subcommand only: a commit's arguments carry its whole message.
+        let command: Vec<&str> = args
+            .iter()
+            .copied()
+            .take_while(|a| !a.starts_with('-'))
+            .take(2)
+            .collect();
         Err(format!(
             "git {} failed: {}",
-            args.join(" "),
+            command.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }

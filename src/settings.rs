@@ -25,6 +25,9 @@ pub struct Settings {
     pub claude_agents_dir: PathBuf,
     pub codex_agents_dir: PathBuf,
     pub agy_agents_dir: PathBuf,
+    /// Whether brigade is running inside Codex's sandbox, where a harness can't
+    /// reach its API and a detached run dies with the shell call that started it.
+    pub in_codex_sandbox: bool,
 }
 
 impl Settings {
@@ -64,6 +67,8 @@ impl Settings {
             codex_agents_dir: codex.join("agents"),
             // agy only looks at the top of this directory, not in subdirectories.
             agy_agents_dir: home.join(".gemini/config/agents"),
+            // Codex sets the first on Linux and macOS, and the second on macOS.
+            in_codex_sandbox: set("CODEX_SANDBOX_NETWORK_DISABLED").is_some() || set("CODEX_SANDBOX").is_some(),
             home,
         })
     }

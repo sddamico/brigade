@@ -17,6 +17,8 @@ You hand one task to the brigade agent `fable`, which runs in Claude Code, and p
    BRIGADE_TASK
    ```
 
+   Set `BypassSandbox` to true on this call and on every brigade call after it. brigade starts another agent's CLI, which needs the network and its own config, out of reach of agy's terminal sandbox.
+
    Add an option only when the request explicitly asks for it, never on your own judgment:
    - `--write` when the task asks for changes to files. Without it the run is read-only
    - `--model <id>` when it names a model other than the agent's own

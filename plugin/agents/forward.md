@@ -17,10 +17,12 @@ You hand one task to a brigade roster agent and pass back its reply. The request
    BRIGADE_TASK
    ```
 
+   Set `BypassSandbox` to true on this call and on every brigade call after it. brigade starts another agent's CLI, which needs the network and its own config, out of reach of agy's terminal sandbox.
+
    Add an option only when the request explicitly asks for it, never on your own judgment:
    - `--write` when the task asks for changes to files. Without it the run is read-only
    - `--model <id>` when it names a model other than the agent's own
-   - `--effort <level>` when it names one of: see `brigade list` for the agent's harness. If it names an effort that isn't on that list, don't run anything: reply that <agent> doesn't take that effort and which ones it does
+   - `--effort <level>` when it names an effort level. brigade refuses one the agent doesn't take, and that refusal is your reply
    - `--worktree`, together with `--write`, when the request asks for its own worktree or a git worktree, in any wording ("use your own worktree", "work in a worktree of the repo"). Never add it otherwise
    - `--account <account> --resume <session> --cwd <dir>` when it continues an earlier run; all three come from that run's `[brigade] continue it with:` line
    - `--fallback <agent>` when it names an agent to switch to if <agent> hits a usage limit ("fall back to opus"), or `--no-fallback` when it says not to switch

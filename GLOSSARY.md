@@ -8,7 +8,7 @@
 
 **Benchmark source**: where benchmark figures come from and when they were read, under a key that each benchmark names (`aa` for the built-in Artificial Analysis figures).
 
-**Served model**: the model a server that switches models has loaded, as its `/v1/models` reports it to `capacity --refresh`. An account with `models_url` gives its agents the matching `[[served_model]]` entry's best-for and benchmark.
+**Served model**: the model a server that switches models has loaded, as its `/v1/models` reports it to `capacity --refresh`. When the server lists exactly one model, an account with `models_url` gives its agents the matching `[[served_model]]` entry's best-for and benchmark.
 
 **Route**: an agent as one account offers it: the harness, model and account a run on it uses. An agent several accounts offer has a route through each, and a run takes the first route with capacity, in account order.
 
@@ -24,7 +24,7 @@
 
 **Forwarder**: a subagent definition whose only job is to start a run through the brigade CLI and return the reply. A host gets one for each agent from another harness. Forwarders run on a small model of the host's: sonnet in Claude Code, gpt-6.1-terra in Codex, the flash tier in agy. `forward` is the generic forwarder, which takes the agent's name from the request and covers user-roster agents. `brigade install-agents` gives each user-roster agent a forwarder of its own, in each harness's user-level agents directory.
 
-**Run**: one task handed to one agent through the brigade CLI. Each run has an id (`<agent>-<hex>`) and a directory under `~/.local/state/brigade/runs/` holding the request, the harness's logs and the outcome.
+**Run**: one task handed to one agent through the brigade CLI. Each run has an id (`<agent>-<hex>`, naming the agent asked for, which stays the id after a fallback) and a private directory under `~/.local/state/brigade/runs/` holding the request, the harness's logs (one set per route it tried) and the outcome. Finished runs are deleted after a week.
 
 **Read-only run**: the default. The harness's file-edit tools are removed and the task says not to change files; Codex also sandboxes its shell read-only.
 

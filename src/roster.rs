@@ -184,6 +184,11 @@ pub enum RosterError {
         account: String,
         problem: String,
     },
+    InvalidServedModel {
+        origin: String,
+        model: String,
+        problem: String,
+    },
     InvalidHarness {
         origin: String,
         harness: String,
@@ -202,6 +207,9 @@ impl fmt::Display for RosterError {
                 account,
                 problem,
             } => write!(f, "{origin}: account `{account}` {problem}"),
+            RosterError::InvalidServedModel { origin, model, problem } => {
+                write!(f, "{origin}: served model `{model}` {problem}")
+            }
             RosterError::InvalidHarness {
                 origin,
                 harness,
@@ -390,39 +398,36 @@ impl Roster {
                 });
             }
         }
-        let benchmark =
-            |entry: &Option<BenchmarkEntry>, origin: &str, agent: &str| -> Result<Option<Benchmark>, RosterError> {
-                let Some(entry) = entry else { return Ok(None) };
-                let invalid = |problem: String| RosterError::Invalid {
-                    origin: origin.to_string(),
-                    agent: agent.to_string(),
-                    problem,
-                };
-                let source = sources.get(&entry.source).ok_or_else(|| {
-                    invalid(format!(
-                        "has a benchmark from `{}`, which isn't a benchmark source",
-                        entry.source
-                    ))
-                })?;
-                if !(0.0..=100.0).contains(&entry.intelligence) {
-                    return Err(invalid(format!("scores {}, outside 0 to 100", entry.intelligence)));
-                }
-                if entry.cost_per_task.is_some_and(|c| c < 0.0) || entry.minutes_per_task.is_some_and(|m| m < 0.0) {
-                    return Err(invalid("has a negative cost or time per task".into()));
-                }
-                Ok(Some(Benchmark {
-                    source: BenchmarkSource {
-                        key: entry.source.clone(),
-                        name: source.name.clone(),
-                        url: source.url.clone(),
-                        read: source.read.clone(),
-                    },
-                    intelligence: entry.intelligence,
-                    cost_per_task: entry.cost_per_task,
-                    minutes_per_task: entry.minutes_per_task,
-                    effort: entry.effort,
-                }))
-            };
+        // `invalid` says whose benchmark it is: an agent's or a served model's.
+        let benchmark = |entry: &Option<BenchmarkEntry>,
+                         invalid: &dyn Fn(String) -> RosterError|
+         -> Result<Option<Benchmark>, RosterError> {
+            let Some(entry) = entry else { return Ok(None) };
+            let source = sources.get(&entry.source).ok_or_else(|| {
+                invalid(format!(
+                    "has a benchmark from `{}`, which isn't a benchmark source",
+                    entry.source
+                ))
+            })?;
+            if !(0.0..=100.0).contains(&entry.intelligence) {
+                return Err(invalid(format!("scores {}, outside 0 to 100", entry.intelligence)));
+            }
+            if entry.cost_per_task.is_some_and(|c| c < 0.0) || entry.minutes_per_task.is_some_and(|m| m < 0.0) {
+                return Err(invalid("has a negative cost or time per task".into()));
+            }
+            Ok(Some(Benchmark {
+                source: BenchmarkSource {
+                    key: entry.source.clone(),
+                    name: source.name.clone(),
+                    url: source.url.clone(),
+                    read: source.read.clone(),
+                },
+                intelligence: entry.intelligence,
+                cost_per_task: entry.cost_per_task,
+                minutes_per_task: entry.minutes_per_task,
+                effort: entry.effort,
+            }))
+        };
         let served_models = served
             .iter()
             .map(|(m, origin)| {
@@ -430,7 +435,11 @@ impl Roster {
                     id: m.id.clone(),
                     description: m.description.clone(),
                     best_for: m.best_for.clone(),
-                    benchmark: benchmark(&m.benchmark, origin, &m.id)?,
+                    benchmark: benchmark(&m.benchmark, &|problem| RosterError::InvalidServedModel {
+                        origin: origin.to_string(),
+                        model: m.id.clone(),
+                        problem,
+                    })?,
                 })
             })
             .collect::<Result<Vec<_>, RosterError>>()?;
@@ -475,7 +484,11 @@ impl Roster {
                     )));
                 }
             }
-            benchmark(&entry.benchmark, origin, &entry.name)?;
+            benchmark(&entry.benchmark, &|problem| RosterError::Invalid {
+                origin: origin.to_string(),
+                agent: entry.name.clone(),
+                problem,
+            })?;
             for (name, efforts) in &entry.efforts {
                 let harness = harness_named(name).expect("checked above");
                 if let Some(effort) = efforts.iter().find(|e| !harness.supports(**e)) {
@@ -545,7 +558,11 @@ impl Roster {
                         model: model.clone(),
                         effort: None,
                         best_for: entry.best_for.clone(),
-                        benchmark: benchmark(&entry.benchmark, origin, name)?,
+                        benchmark: benchmark(&entry.benchmark, &|problem| RosterError::Invalid {
+                            origin: origin.to_string(),
+                            agent: name.to_string(),
+                            problem,
+                        })?,
                         env: account.env.clone(),
                         args: account.args.clone(),
                         account: reference.clone(),
@@ -585,7 +602,11 @@ impl Roster {
                     efforts: own.efforts.clone(),
                     description: own.description.clone(),
                     best_for: own.best_for.clone(),
-                    benchmark: benchmark(&own.benchmark, origin, &own.name)?,
+                    benchmark: benchmark(&own.benchmark, &|problem| RosterError::Invalid {
+                        origin: origin.to_string(),
+                        agent: own.name.clone(),
+                        problem,
+                    })?,
                     env,
                     args: account.args.iter().chain(&own.args).cloned().collect(),
                     account: reference.clone(),
@@ -732,8 +753,13 @@ fn check_unique<'a>(names: impl Iterator<Item = &'a str>, origin: &str, what: &s
 
 fn is_date(text: &str) -> bool {
     let parts: Vec<&str> = text.split('-').collect();
-    matches!(parts.as_slice(), [y, m, d] if y.len() == 4 && m.len() == 2 && d.len() == 2
-        && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())))
+    let digits = parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()));
+    match parts.as_slice() {
+        [y, m, d] if digits && y.len() == 4 && m.len() == 2 && d.len() == 2 => {
+            matches!(m.parse::<u32>(), Ok(1..=12)) && matches!(d.parse::<u32>(), Ok(1..=31))
+        }
+        _ => false,
+    }
 }
 
 fn check_agent_name(name: &str, origin: &str) -> Result<(), RosterError> {

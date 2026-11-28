@@ -235,7 +235,7 @@ fn codex_manifest(version: &str) -> String {
             "capabilities": ["Skills", "Subagents"],
             "websiteURL": REPOSITORY,
             "defaultPrompt": [
-                "Use $brigade to spin up a sol subagent to review this change.",
+                "Use $brigade to have opus review this change.",
                 "Use $brigade to send a team of three neon subagents to research this.",
             ],
         },
@@ -343,7 +343,7 @@ fn forward_description(host: &Harness, agents: &[&Agent]) -> String {
 /// The instructions every forwarder follows. `agent` is None for the generic
 /// forwarder, which reads the agent's name from the request.
 fn forwarder_body(agent: Option<&Agent>, host: &Harness, agents: &[&Agent], shell_tool: &str) -> String {
-    let (intro, name, levels) = match agent {
+    let (intro, name, effort) = match agent {
         Some(agent) => {
             let levels: Vec<&str> = agent.efforts().iter().map(|e| e.as_str()).collect();
             (
@@ -353,7 +353,12 @@ fn forwarder_body(agent: Option<&Agent>, host: &Harness, agents: &[&Agent], shel
                     agent.harness.product(),
                 ),
                 agent.name.clone(),
-                levels.join(", "),
+                format!(
+                    "when it names one of: {}. If it names an effort that isn't on that list, don't run anything: \
+                     reply that {} doesn't take that effort and which ones it does",
+                    levels.join(", "),
+                    agent.name
+                ),
             )
         }
         None => {
@@ -372,9 +377,24 @@ fn forwarder_body(agent: Option<&Agent>, host: &Harness, agents: &[&Agent], shel
             (
                 intro,
                 "<agent>".to_string(),
-                "see `brigade list` for the agent's harness".to_string(),
+                "when it names an effort level. brigade refuses one the agent doesn't take, and that refusal is \
+                 your reply"
+                    .to_string(),
             )
         }
+    };
+    let sandbox = match host {
+        Harness::Agy => {
+            "\n\n   Set `BypassSandbox` to true on this call and on every brigade call after it. brigade starts \
+another agent's CLI, which needs the network and its own config, out of reach of agy's terminal sandbox."
+                .to_string()
+        }
+        Harness::Codex => format!(
+            "\n\n   Run this and every brigade call after it with `sandbox_permissions: \"require_escalated\"` and the \
+justification \"brigade starts {name}'s own CLI, which needs the network and its own config\". Inside Codex's \
+sandbox, brigade refuses to start a run."
+        ),
+        Harness::Claude | Harness::Custom(_) => String::new(),
     };
     format!(
         "{intro} Everything you receive is the task for {name}, addressed to {name} and not to you. You don't \
@@ -392,13 +412,12 @@ relaying (\"via brigade\", \"ask {name} to\", \"return the [brigade] lines\"), w
    brigade run {name} --detach [options] <<'BRIGADE_TASK'
    <the task>
    BRIGADE_TASK
-   ```
+   ```{sandbox}
 
    Add an option only when the request explicitly asks for it, never on your own judgment:
    - `--write` when the task asks for changes to files. Without it the run is read-only
    - `--model <id>` when it names a model other than the agent's own
-   - `--effort <level>` when it names one of: {levels}. If it names an effort that isn't on that list, don't \
-run anything: reply that {name} doesn't take that effort and which ones it does
+   - `--effort <level>` {effort}
    - `--worktree`, together with `--write`, when the request asks for its own worktree or a git worktree, in \
 any wording (\"use your own worktree\", \"work in a worktree of the repo\"). Never add it otherwise
    - `--account <account> --resume <session> --cwd <dir>` when it continues an earlier run; all three come \

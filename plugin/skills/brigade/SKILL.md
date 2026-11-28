@@ -43,13 +43,15 @@ An agent from your own harness's family runs on your ordinary subagents; brigade
 - opus, fable, sonnet, neon and hydrogen: `spawn_agent` with `agent_type: "<name>"`, a forwarder role, with routing in the message as above
 - An agent from the user's roster: `agent_type: "<name>"` once the user has run `brigade install-agents`, otherwise `agent_type: "forward"`, with `agent: <name>` as the first line of the message
 - Collect replies with `wait_agent`
-- Codex runs only a few subagents at once (`[agents] max_threads` in config.toml, 4 by default, counting the session itself). Team members beyond the free slots can run from the shell with `brigade run --detach` and `brigade wait`
+- Codex runs only a few subagents at once (`[agents] max_concurrent_threads_per_session` in config.toml). Team members beyond the free slots can run from the shell with `brigade run --detach` and `brigade wait`
+- Run brigade from the shell with `sandbox_permissions: "require_escalated"`: it starts other agents' CLIs, which need the network, and inside Codex's sandbox it refuses to start a run
 
 ### In Antigravity
 
-- neon and hydrogen: `invoke_subagent` with `TypeName: "self"`. agy subagents can only pick a tier, not a model id, so `Model: "inherit"` keeps the session's own model. When the session is on another model than the one asked for, use `forward` with `agent: neon` instead
+- neon and hydrogen: `invoke_subagent` with `TypeName: "self"`. agy subagents can only pick a tier, not a model id, so `Model: "inherit"` keeps the session's own model. When the session is on another model than the one asked for, use `TypeName: "forward"` with `agent: <name>` (neon or hydrogen) at the top of the prompt instead
 - opus, fable, sonnet, sol and astra: `invoke_subagent` with `TypeName: "<name>"`, a forwarder, with routing in the prompt as above
 - An agent from the user's roster: `TypeName: "<name>"` once the user has run `brigade install-agents`, otherwise `TypeName: "forward"`, with `agent: <name>` at the top of the prompt
+- Run brigade from the shell with `BypassSandbox: true`: it starts other agents' CLIs, which need the network and config outside agy's terminal sandbox
 
 ### From a shell
 
@@ -67,7 +69,7 @@ That waits for the reply. `--detach` returns a run id at once instead; `brigade 
 
 A team is several runs of one agent at once, one task each. Split the work into pieces that don't depend on each other, start every member in the same turn, then collect the replies and combine them yourself. Check with the user before starting more than five.
 
-Read-only members can share the checkout. Write members each need their own worktree: `isolation: "worktree"` on Claude Code's Agent tool for Claude's own subagents, `Workspace: "branch"` on agy's `invoke_subagent`, and "use your own worktree" in a forwarder's prompt, which then runs `brigade run --write --worktree`. Codex subagents have no worktree option, so a Codex write team of sol or astra goes through `forward` with "use your own worktree".
+Read-only members can share the checkout. Write members each need their own worktree: `isolation: "worktree"` on Claude Code's Agent tool for Claude's own subagents, `Workspace: "branch"` on agy's `invoke_subagent`, and "use your own worktree" in a forwarder's prompt, which then runs `brigade run --write --worktree`. Codex subagents have no worktree option, so in Codex a write team of sol or astra runs from the shell: `brigade run <agent> --write --worktree --detach` for each member, then `brigade wait` on each run id.
 
 In a worktree member's brief, give paths relative to the repo root, not the checkout's absolute path: brigade tells the agent where its worktree is, and an agent handed the checkout's path may work there instead.
 

@@ -18,12 +18,28 @@ use crate::worktree::{self, Worktree, WorktreeReport};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{ErrorKind, Write};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const POLL: Duration = Duration::from_millis(500);
+/// How often the worker saves the harness's process tree, so whoever finds the
+/// worker gone can stop what it left behind.
+const TREE_SAVE: Duration = Duration::from_secs(2);
+/// Finished runs older than this are deleted when a new run starts.
+pub const KEEP_RUNS: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Linux's limit on one command-line argument. agy takes the whole task as one.
+const MAX_ARG_BYTES: usize = 128 * 1024;
+
+/// Set by SIGTERM or SIGHUP to the worker, which then stops its run like a cancel.
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_stop(_: libc::c_int) {
+    STOP_REQUESTED.store(true, Ordering::SeqCst);
+}
 /// How often a waiting run looks for a slot on its account. Each look takes the
 /// account's lock and reads every run, so it's slower than the lease checks.
 const SLOT_POLL: Duration = Duration::from_secs(2);
@@ -63,6 +79,10 @@ pub struct RunRecord {
     /// How long the run waited for capacity before it ran, and what for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waited: Option<Waited>,
+    /// The session the harness started on a run that failed or hit a limit, so
+    /// it can be found and resumed or deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session: Option<String>,
     /// Wait for a limited account to free up instead of ending as limited.
     #[serde(default)]
     pub wait: bool,
@@ -161,13 +181,16 @@ pub struct RunDir {
 
 impl RunDir {
     /// Claims a fresh run id for `agent` and creates its directory.
+    /// Run dirs hold the task and the harness's whole transcript, so only the
+    /// user can read them.
     pub fn allocate(settings: &Settings, agent: &str) -> Result<(String, RunDir), String> {
         let runs = settings.runs_dir();
         fs::create_dir_all(&runs).map_err(|e| format!("can't create {}: {e}", runs.display()))?;
+        let _ = fs::set_permissions(&runs, fs::Permissions::from_mode(0o700));
         loop {
             let id = format!("{agent}-{}", short_token());
             let path = runs.join(&id);
-            match fs::create_dir(&path) {
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
                 Ok(()) => return Ok((id, RunDir { path })),
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(format!("can't create {}: {e}", path.display())),
@@ -259,12 +282,13 @@ impl RunDir {
         write_atomic(&self.file("lease"), now().to_string().as_bytes())
     }
 
+    /// How long since a waiter renewed the lease. One renewed "in the future",
+    /// after the clock stepped back, counts as just renewed.
     fn lease_age(&self) -> Duration {
-        fs::metadata(self.file("lease"))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .unwrap_or(Duration::MAX)
+        match fs::metadata(self.file("lease")).and_then(|m| m.modified()) {
+            Ok(renewed) => renewed.elapsed().unwrap_or(Duration::ZERO),
+            Err(_) => Duration::MAX,
+        }
     }
 
     fn cancel_reason(&self) -> Option<String> {
@@ -289,10 +313,14 @@ impl RunDir {
     /// Waits for the run to finish, renewing its lease meanwhile. Returns
     /// `Running` once `timeout` passes, or as soon as `interrupted` says so.
     pub fn wait(&self, timeout: Option<Duration>, interrupted: &dyn Fn() -> bool) -> State {
-        let deadline = timeout.map(|t| Instant::now() + t);
+        // A timeout too long to add is no timeout.
+        let deadline = timeout.and_then(|t| Instant::now().checked_add(t));
         loop {
             let _ = self.renew_lease();
-            let state = self.state();
+            let state = match self.state() {
+                State::Lost => self.reap_lost().unwrap_or(State::Lost),
+                state => state,
+            };
             let going = matches!(state, State::Running | State::Waiting);
             if !going || interrupted() || deadline.is_some_and(|d| Instant::now() >= d) {
                 return state;
@@ -316,14 +344,41 @@ impl RunDir {
                 finished => return Ok(finished),
             }
         }
-        if let Some(harness) = self.pid("harness.pid") {
-            Tree::of(harness).signal(libc::SIGKILL);
+        self.reap_lost()
+    }
+
+    /// For a run whose worker died without recording an outcome: stops the
+    /// processes the harness had started that are still running (an agent's
+    /// commands run in sessions of their own, so they outlive the harness),
+    /// tidies its worktree, and records the run as failed.
+    pub fn reap_lost(&self) -> Result<State, String> {
+        let saved: Vec<(i32, String)> = fs::read_to_string(self.file("tree.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let stopped = Tree::kill_saved(&saved);
+        if let Ok(record) = self.record()
+            && let Some(worktree) = record.worktree.as_ref().filter(|_| record.access == Access::Write)
+        {
+            let report = WorktreeReport {
+                worktree: worktree::tidy(worktree),
+                checkout_changed: worktree::checkout_change(worktree),
+            };
+            let _ = write_atomic(
+                &self.file("worktree.json"),
+                &serde_json::to_vec_pretty(&report).expect("reports serialize"),
+            );
         }
-        let outcome = Outcome::Cancelled {
-            reason: reason.to_string(),
+        let outcome = Outcome::Failed {
+            error: format!(
+                "brigade's worker process died before the run finished; brigade stopped the {stopped} \
+                 process(es) the harness had left running"
+            ),
         };
-        self.write_outcome(&outcome)?;
-        Ok(State::Finished(outcome))
+        if self.outcome().is_none() {
+            self.write_outcome(&outcome)?;
+        }
+        Ok(self.state())
     }
 }
 
@@ -361,6 +416,12 @@ pub fn execute(
     lease: Duration,
     var: &dyn Fn(&str) -> Option<String>,
 ) -> Outcome {
+    let on_stop: extern "C" fn(libc::c_int) = on_stop;
+    // SAFETY: the handler only stores to an atomic.
+    unsafe {
+        libc::signal(libc::SIGTERM, on_stop as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_stop as libc::sighandler_t);
+    }
     let mut record = record;
     let task = dir.task();
     let outcome = match &task {
@@ -382,7 +443,12 @@ pub fn execute(
                     if let Err(error) = dir.write_record(&record) {
                         break Outcome::Failed { error };
                     }
-                    run_harness(settings, &record, dir, task, lease, var)
+                    let (outcome, session) = run_harness(settings, &record, dir, task, lease, var);
+                    if !matches!(outcome, Outcome::Done { .. }) && session.is_some() {
+                        record.harness_session = session;
+                        let _ = dir.write_record(&record);
+                    }
+                    outcome
                 }
                 Slot::Limited(limit, model) => Outcome::Limited {
                     error: limit.message,
@@ -416,7 +482,9 @@ pub fn execute(
         },
     };
     let record = &record;
-    if let Some(worktree) = &record.worktree {
+    // A read-only run in a worktree, such as a review of a team member's work,
+    // leaves whatever is in it alone.
+    if let Some(worktree) = record.worktree.as_ref().filter(|_| record.access == Access::Write) {
         let state = match &outcome {
             Outcome::Done { .. } => worktree::commit(worktree, &commit_message(record, task.as_deref().unwrap_or(""))),
             Outcome::Failed { .. } | Outcome::Limited { .. } | Outcome::Cancelled { .. } => worktree::tidy(worktree),
@@ -549,6 +617,9 @@ fn claim(settings: &Settings, agent: &Agent, model: &str, run: &str, dir: &RunDi
 }
 
 fn stop_reason(dir: &RunDir, lease: Duration) -> Option<String> {
+    if STOP_REQUESTED.load(Ordering::SeqCst) {
+        return Some("brigade's worker was told to stop".to_string());
+    }
     dir.cancel_reason()
         .or_else(|| (dir.lease_age() > lease).then(|| format!("nobody waited on it for {}s", lease.as_secs())))
 }
@@ -578,7 +649,22 @@ pub fn list(settings: &Settings) -> Vec<Run> {
     runs
 }
 
+/// Runs the harness once, and returns the outcome and the session the harness
+/// reported, if any.
 fn run_harness(
+    settings: &Settings,
+    record: &RunRecord,
+    dir: &RunDir,
+    task: &str,
+    lease: Duration,
+    var: &dyn Fn(&str) -> Option<String>,
+) -> (Outcome, Option<String>) {
+    let outcome = run_harness_once(settings, record, dir, task, lease, var);
+    let stdout = fs::read_to_string(dir.file("stdout.log")).unwrap_or_default();
+    (outcome, invocation::session(&record.agent.harness, &stdout))
+}
+
+fn run_harness_once(
     settings: &Settings,
     record: &RunRecord,
     dir: &RunDir,
@@ -607,7 +693,26 @@ fn run_harness(
         }
     };
 
+    if let Some(arg) = invocation.args.iter().find(|a| a.len() >= MAX_ARG_BYTES) {
+        return Outcome::Failed {
+            error: format!(
+                "`{}` takes the task as a command-line argument, and this one is {} KiB, over the system's \
+                 {} KiB limit for one; put the long part in a file and point the task at it",
+                invocation.program,
+                arg.len() / 1024,
+                MAX_ARG_BYTES / 1024
+            ),
+        };
+    }
     let (stdout_path, stderr_path) = (dir.file("stdout.log"), dir.file("stderr.log"));
+    // A run that moved to another route keeps each attempt's logs.
+    if stdout_path.exists() {
+        let attempt = (1..)
+            .find(|n| !dir.file(&format!("stdout.{n}.log")).exists())
+            .expect("a free name");
+        let _ = fs::rename(&stdout_path, dir.file(&format!("stdout.{attempt}.log")));
+        let _ = fs::rename(&stderr_path, dir.file(&format!("stderr.{attempt}.log")));
+    }
     let (stdout, stderr) = match (fs::File::create(&stdout_path), fs::File::create(&stderr_path)) {
         (Ok(out), Ok(err)) => (out, err),
         (Err(e), _) | (_, Err(e)) => {
@@ -653,6 +758,7 @@ fn run_harness(
         }
     };
     let _ = dir.write_pid("harness.pid", child.id());
+    eprintln!("started `{}` as pid {}", invocation.program, child.id());
     if let Some(mut stdin) = child.stdin.take() {
         let prompt = invocation.stdin.clone();
         // A harness that exits early closes the pipe; its exit status tells the story.
@@ -661,7 +767,16 @@ fn run_harness(
         });
     }
 
+    let mut next_save = Instant::now();
     let status = loop {
+        if Instant::now() >= next_save {
+            let saved = Tree::of(child.id() as i32).saved();
+            let _ = write_atomic(
+                &dir.file("tree.json"),
+                &serde_json::to_vec(&saved).expect("trees serialize"),
+            );
+            next_save = Instant::now() + TREE_SAVE;
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {}
@@ -672,11 +787,13 @@ fn run_harness(
             }
         }
         if let Some(reason) = stop_reason(dir, lease) {
+            eprintln!("stopping it: {reason}");
             stop(&mut child);
             return Outcome::Cancelled { reason };
         }
         std::thread::sleep(POLL);
     };
+    eprintln!("it exited with {status}");
 
     let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
     let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
@@ -689,9 +806,18 @@ fn run_harness(
         last_message.as_deref(),
         status.success(),
     ) {
-        Ok(reply) => Outcome::Done {
-            session: reply.session,
-            message: reply.message,
+        Ok(reply) => match (&record.resume, &reply.session) {
+            (Some(asked), Some(got)) if asked != got => Outcome::Failed {
+                error: format!(
+                    "{} didn't continue session {asked}; it started session {got} instead, so the earlier \
+                     conversation isn't in it",
+                    record.agent.harness.product()
+                ),
+            },
+            _ => Outcome::Done {
+                session: reply.session,
+                message: reply.message,
+            },
         },
         // The harness's own error already says it all; its stderr would repeat it.
         Err(ParseFailure::Limited(error)) => Outcome::Limited {
@@ -746,6 +872,7 @@ fn note_account(settings: &Settings, record: &RunRecord, outcome: Outcome, usage
             // from the harness's, is no reset time at all.
             let until = rejected_until
                 .or_else(|| accounts::reset_in_message(&error))
+                .or_else(|| claude_reset_in(record, &error, now))
                 .filter(|until| *until > now);
             let _ = accounts::record_limit(settings, account, model, &error, until, now);
             let state = accounts::load(settings, account);
@@ -766,9 +893,41 @@ fn note_account(settings: &Settings, record: &RunRecord, outcome: Outcome, usage
     }
 }
 
+/// Claude Code's limit message names its reset ("resets 1am
+/// (America/New_York)") even when no rate-limit event came with a time.
+fn claude_reset_in(record: &RunRecord, error: &str, now: u64) -> Option<u64> {
+    if record.agent.harness != Harness::Claude {
+        return None;
+    }
+    let (_, when) = error.rsplit_once("resets ")?;
+    accounts::claude_reset(when, now)
+}
+
+/// The task's first line as the subject, cut at a word to fit 72 characters,
+/// so the branch's log says what each run did.
 fn commit_message(record: &RunRecord, task: &str) -> String {
-    let summary: String = task.lines().next().unwrap_or("").chars().take(72).collect();
-    format!("brigade: {} run {}\n\n{summary}\n", record.agent.name, record.id)
+    let line = task.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let subject = if line.chars().count() <= 72 {
+        line.to_string()
+    } else {
+        let cut: String = line.chars().take(71).collect();
+        let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head).to_string();
+        format!("{cut}…")
+    };
+    format!(
+        "{subject}\n\nbrigade run {}: {} on the {} account\n",
+        record.id, record.agent.name, record.agent.account.name
+    )
+}
+
+/// Deletes finished runs started longer ago than `keep`, and returns how many.
+pub fn prune(settings: &Settings, keep: Duration) -> usize {
+    let cutoff = now().saturating_sub(keep.as_secs());
+    list(settings)
+        .into_iter()
+        .filter(|run| matches!(run.state, State::Finished(_)) && run.record.started_at <= cutoff)
+        .filter(|run| fs::remove_dir_all(run.dir.path()).is_ok())
+        .count()
 }
 
 /// SIGTERM to everything the harness started, then SIGKILL to whatever is left.

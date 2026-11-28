@@ -4,7 +4,7 @@ use brigade::harness::{Access, Effort};
 use brigade::install::{self, Change};
 use brigade::invocation::{UnsetVar, expand};
 use brigade::process::Lineage;
-use brigade::report::{self, WAIT_SLICE_SECS};
+use brigade::report;
 use brigade::roster::{Agent, Roster};
 use brigade::runs::{self, Outcome, RunDir, RunRecord, State};
 use brigade::settings::{MAX_DEPTH, Settings};
@@ -35,8 +35,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List the roster: the built-in agents plus your own from ~/.config/brigade/roster.toml
+    /// List the roster: the built-in agents plus your own from your roster file
+    /// ($XDG_CONFIG_HOME/brigade/roster.toml, or ~/.config/brigade/roster.toml)
     List {
+        /// Print the result as JSON
         #[arg(long)]
         json: bool,
     },
@@ -44,16 +46,20 @@ enum Command {
     Run(RunArgs),
     /// Wait for a detached run and print its reply
     Wait {
+        /// The run's id, as `brigade run --detach` or `brigade runs` printed it
         run: String,
         /// Give up after this many seconds and report the run as still running
         #[arg(long, value_name = "SECONDS")]
         timeout: Option<u64>,
+        /// Print the result as JSON
         #[arg(long)]
         json: bool,
     },
     /// Stop a run and everything its harness started
     Cancel {
+        /// The run's id, as `brigade run --detach` or `brigade runs` printed it
         run: String,
+        /// Print the result as JSON
         #[arg(long)]
         json: bool,
     },
@@ -73,6 +79,10 @@ enum Command {
         /// Only runs in this state
         #[arg(long, value_parser = ["waiting", "running", "done", "failed", "limited", "cancelled", "lost"])]
         state: Option<String>,
+        /// Delete every finished run's directory. Finished runs older than a week are deleted anyway
+        #[arg(long, conflicts_with = "state")]
+        prune: bool,
+        /// Print the result as JSON
         #[arg(long)]
         json: bool,
     },
@@ -118,12 +128,16 @@ struct RunArgs {
     /// If the agent's account is limited, wait for it to free up instead of ending as limited
     #[arg(long)]
     wait: bool,
-    /// Start the run in the background, print its id and return. It's cancelled if nobody waits on it for 90s
+    /// Start the run in the background, print its id and return. It's cancelled if nobody waits on it for
+    /// 90s ($BRIGADE_LEASE_SECS)
     #[arg(long)]
     detach: bool,
+    /// Print the result as JSON
     #[arg(long)]
     json: bool,
-    /// The task; read from stdin when omitted or `-`
+    /// The task; read from stdin when omitted or `-`. Everything after the agent's options is the task, so
+    /// words in it like `--write` stay words
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     task: Vec<String>,
 }
 
@@ -175,11 +189,18 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         Command::Run(args) => run(&settings, args),
         Command::Wait { run, timeout, json } => {
             let (_, dir) = RunDir::open(&settings, &run)?;
+            let started = Instant::now();
             let state = dir.wait(timeout.map(Duration::from_secs), &orphan_check());
-            print_state(&settings, &dir, &state, json, timeout.unwrap_or(WAIT_SLICE_SECS))
+            print_state(&settings, &dir, &state, json, started.elapsed().as_secs())
         }
         Command::Cancel { run, json } => {
             let (_, dir) = RunDir::open(&settings, &run)?;
+            if let State::Finished(_) = dir.state() {
+                if !json {
+                    eprintln!("[brigade] run {run} had already finished, so there was nothing to cancel");
+                }
+                return print_state(&settings, &dir, &dir.state(), json, 0);
+            }
             let state = dir.cancel("cancelled with brigade cancel")?;
             let _ = print_state(&settings, &dir, &state, json, 0)?;
             Ok(ExitCode::SUCCESS)
@@ -205,8 +226,8 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
             }
             let roster = Roster::load(&settings.roster_file).map_err(|e| e.to_string())?;
             if refresh {
-                for (account, error) in capacity::refresh(&settings, &roster, runs::now()) {
-                    eprintln!("brigade: couldn't read the {account} account's usage: {error}");
+                for failure in capacity::refresh(&settings, &roster, runs::now()) {
+                    eprintln!("brigade: {failure}");
                 }
             }
             let accounts = capacity::capacity(&settings, &roster, runs::now(), &env_var);
@@ -220,7 +241,12 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Runs { state, json } => {
+        Command::Runs { prune: true, .. } => {
+            let pruned = runs::prune(&settings, Duration::ZERO);
+            println!("deleted {pruned} finished run(s)");
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Runs { state, json, .. } => {
             let runs: Vec<_> = runs::list(&settings)
                 .into_iter()
                 .filter(|run| state.as_deref().is_none_or(|s| report::state_name(&run.state) == s))
@@ -273,6 +299,14 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
 }
 
 fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
+    if settings.in_codex_sandbox {
+        return Err(
+            "can't start a run inside Codex's sandbox, where the agent's CLI can't reach its API and a \
+                    detached run ends with the shell call. Run brigade with `sandbox_permissions: \
+                    \"require_escalated\"`, or outside the sandbox"
+                .into(),
+        );
+    }
     if settings.depth >= MAX_DEPTH {
         return Err(format!(
             "this is already a depth-{} brigade worker, and runs nest at most {MAX_DEPTH} deep",
@@ -360,6 +394,10 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     let cwd = cwd
         .canonicalize()
         .map_err(|e| format!("can't use {} as the cwd: {e}", cwd.display()))?;
+    if !cwd.is_dir() {
+        return Err(format!("can't use {} as the cwd: it isn't a directory", cwd.display()));
+    }
+    runs::prune(settings, runs::KEEP_RUNS);
 
     let (id, dir) = RunDir::allocate(settings, &agent.name)?;
     let (worktree, cwd) = if args.worktree {
@@ -388,6 +426,7 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         asked_effort: args.effort,
         fell_back_from: Vec::new(),
         waited: None,
+        harness_session: None,
         wait: args.wait,
     };
     dir.write_request(&record, &task)?;
@@ -407,11 +446,13 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     // Reaped here so a worker that dies shows up as gone rather than as a zombie.
     std::thread::spawn(move || worker.wait());
     let orphaned = orphan_check();
-    let state = match dir.wait(None, &|| INTERRUPTED.load(Ordering::SeqCst) || orphaned()) {
-        State::Running if INTERRUPTED.load(Ordering::SeqCst) => dir.cancel("interrupted")?,
+    let started = Instant::now();
+    let stopping = || INTERRUPTED.load(Ordering::SeqCst);
+    let state = match dir.wait(None, &|| stopping() || orphaned()) {
+        State::Running | State::Waiting if stopping() => dir.cancel("interrupted")?,
         state => state,
     };
-    let code = print_state(settings, &dir, &state, args.json, 0)?;
+    let code = print_state(settings, &dir, &state, args.json, started.elapsed().as_secs())?;
     Ok(if INTERRUPTED.load(Ordering::SeqCst) {
         ExitCode::from(INTERRUPTED_EXIT)
     } else {
@@ -468,13 +509,16 @@ extern "C" fn on_interrupt(_: libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
-/// Ctrl-C on a foreground run cancels it. The worker sits in a session of its
-/// own, out of reach of the terminal's signal, so brigade passes it on.
+/// Ctrl-C, SIGTERM or a closed terminal cancels a foreground run. The worker
+/// sits in a session of its own, out of reach of those signals, so brigade
+/// passes them on.
 fn trap_interrupt() {
     let handler: extern "C" fn(libc::c_int) = on_interrupt;
     // SAFETY: the handler only stores to an atomic.
     unsafe {
-        libc::signal(libc::SIGINT, handler as libc::sighandler_t);
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::signal(signal, handler as libc::sighandler_t);
+        }
     }
 }
 

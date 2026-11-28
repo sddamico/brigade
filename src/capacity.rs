@@ -113,10 +113,10 @@ pub fn capacity(
         .collect()
 }
 
-/// Reads every account's quotas from its harness, all at once since each read
-/// takes a few seconds, and records them. Returns the accounts it couldn't
-/// read, with why.
-pub fn refresh(settings: &Settings, roster: &Roster, now: u64) -> Vec<(String, String)> {
+/// Reads every account's quotas from its harness, and the models each model
+/// server lists, all at once since each read takes a few seconds, and records
+/// them. Returns what it couldn't read, and why.
+pub fn refresh(settings: &Settings, roster: &Roster, now: u64) -> Vec<String> {
     let var = |name: &str| std::env::var(name).ok();
     let readable: Vec<_> = roster.accounts().iter().filter(|a| a.harness.is_some()).collect();
     let results: Vec<(String, Result<Vec<Quota>, String>)> = std::thread::scope(|scope| {
@@ -137,14 +137,18 @@ pub fn refresh(settings: &Settings, roster: &Roster, now: u64) -> Vec<(String, S
     });
     let mut failures = Vec::new();
     for (account, result) in served {
-        if let Err(error) = result.and_then(|models| accounts::record_serving(settings, &account, models)) {
-            failures.push((account, error));
+        // What a server served before a failed read may not be what it serves now.
+        let models = result.as_ref().cloned().unwrap_or_default();
+        let recorded = accounts::record_serving(settings, &account, models);
+        if let Err(error) = result.and(recorded) {
+            failures.push(format!(
+                "couldn't read which models the {account} account serves: {error}"
+            ));
         }
     }
     for (account, result) in results {
-        match result.and_then(|quotas| accounts::record_quotas(settings, &account, quotas, now)) {
-            Ok(()) => {}
-            Err(error) => failures.push((account, error)),
+        if let Err(error) = result.and_then(|quotas| accounts::record_quotas(settings, &account, quotas, now)) {
+            failures.push(format!("couldn't read the {account} account's usage: {error}"));
         }
     }
     failures

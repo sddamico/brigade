@@ -43,7 +43,7 @@ pub fn done(record: &RunRecord, session: Option<&str>, message: &str, worktree: 
             "[brigade] continue it with: brigade run {} --account {} --resume {session} --cwd {}{choices}\n",
             agent.name,
             agent.account.name,
-            record.cwd.display(),
+            shell_quote(&record.cwd.to_string_lossy()),
         ));
     }
     out.push_str(&worktree_lines(record, worktree));
@@ -52,12 +52,39 @@ pub fn done(record: &RunRecord, session: Option<&str>, message: &str, worktree: 
 
 pub fn failed(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&WorktreeReport>) -> String {
     format!(
-        "{}[brigade] {} failed: {error}\n{}[brigade] logs: {}\n",
+        "{}[brigade] {} failed: {error}\n{}{}[brigade] logs: {}\n",
         fell_back(record),
         record.agent.name,
+        harness_session(record),
         worktree_lines(record, worktree),
         logs.display()
     )
+}
+
+/// The session a run that didn't finish left behind, so it can be resumed or
+/// deleted.
+fn harness_session(record: &RunRecord) -> String {
+    match &record.harness_session {
+        Some(session) => format!(
+            "[brigade] its {} session is {session}\n",
+            record.agent.harness.product()
+        ),
+        None => String::new(),
+    }
+}
+
+/// Quoted for a POSIX shell when it needs to be, so a printed command can be
+/// run as it stands.
+pub fn shell_quote(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:@%+=,".contains(c));
+    if plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
 }
 
 /// Hosts often answer without loading the skill, so the advice on what to do
@@ -103,9 +130,10 @@ pub fn limited(record: &RunRecord, outcome: &Outcome, logs: &Path, worktree: Opt
     };
     format!(
         "{}{what}{when}[brigade] {shared}, so don't retry, switch to another agent or answer in its place. Tell the \
-         user what it said and let them choose what to do; `brigade capacity` shows which agents are free\n{}\
+         user what it said and let them choose what to do; `brigade capacity` shows which agents are free\n{}{}\
          [brigade] logs: {}\n",
         fell_back(record),
+        harness_session(record),
         worktree_lines(record, worktree),
         logs.display()
     )
@@ -226,9 +254,12 @@ pub fn started(record: &RunRecord) -> String {
     )
 }
 
+/// `waited` is how long this waiter waited. The hint always offers the
+/// standard slice, which fits a host's shell-call timeout.
 pub fn still_running(record: &RunRecord, waited: u64) -> String {
     format!(
-        "[brigade] run {id} is still running after {waited}s. Wait again with: brigade wait {id} --timeout {waited}\n",
+        "[brigade] run {id} is still running after {waited}s. Wait again with: brigade wait {id} --timeout \
+         {WAIT_SLICE_SECS}\n",
         id = record.id,
     )
 }
@@ -236,8 +267,8 @@ pub fn still_running(record: &RunRecord, waited: u64) -> String {
 /// `why` says what the run waits for: the account's limit or a free slot.
 pub fn still_waiting(record: &RunRecord, why: &str, waited: u64) -> String {
     format!(
-        "[brigade] run {id} is still waiting for the {account} account, {why}. Wait again with: brigade wait {id} \
-         --timeout {waited}\n",
+        "[brigade] run {id} is still waiting for the {account} account, {why}, after {waited}s. Wait again with: \
+         brigade wait {id} --timeout {WAIT_SLICE_SECS}\n",
         id = record.id,
         account = record.agent.account.name,
     )
@@ -372,8 +403,12 @@ pub fn served_model<'a>(
         .routes(agent)
         .iter()
         .filter_map(|route| serving.get(&route.agent.account.name))
-        .flatten()
-        .find_map(|id| roster.served_model(id))
+        // A server listing several models may list every one it can load, so
+        // the list doesn't say which one runs.
+        .find_map(|ids| match ids.as_slice() {
+            [id] => roster.served_model(id),
+            _ => None,
+        })
 }
 
 fn benchmark_of<'a>(entry: &'a Entry, served: Option<&'a ServedModel>) -> Option<&'a Benchmark> {
@@ -409,6 +444,7 @@ pub fn capacity(accounts: &[AccountCapacity], now: u64) -> String {
             None if !account.agents.is_empty() && account.agents.iter().all(|a| a.limit.is_some()) => {
                 "every model limited".to_string()
             }
+            None if account.agents.is_empty() => "no agents".to_string(),
             None if !account.free => "full".to_string(),
             None => "free".to_string(),
         };
@@ -507,5 +543,18 @@ fn age(secs: u64) -> String {
         60..3600 => format!("{}m ago", secs / 60),
         3600..86400 => format!("{}h ago", secs / 3600),
         _ => format!("{}d ago", secs / 86400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    fn shell_quote_leaves_plain_paths_and_quotes_the_rest() {
+        assert_eq!(shell_quote("/home/me/work-1"), "/home/me/work-1");
+        assert_eq!(shell_quote("/home/me/my project"), "'/home/me/my project'");
+        assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
+        assert_eq!(shell_quote("/tmp/$HOME"), "'/tmp/$HOME'");
     }
 }

@@ -14,6 +14,9 @@ use std::process::Command;
 pub struct Tree {
     pids: BTreeSet<i32>,
     groups: BTreeSet<i32>,
+    /// Each process's start time as `ps` gives it, which tells a process apart
+    /// from a later one that reused its pid.
+    starts: HashMap<i32, String>,
 }
 
 impl Tree {
@@ -22,9 +25,11 @@ impl Tree {
         let table = process_table();
         let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
         let mut group_of = HashMap::new();
-        for &(pid, ppid, pgid) in &table {
-            children.entry(ppid).or_default().push(pid);
-            group_of.insert(pid, pgid);
+        let mut start_of = HashMap::new();
+        for row in &table {
+            children.entry(row.ppid).or_default().push(row.pid);
+            group_of.insert(row.pid, row.pgid);
+            start_of.insert(row.pid, row.start.clone());
         }
         let mut tree = Tree::default();
         let mut pending = vec![root];
@@ -34,6 +39,9 @@ impl Tree {
             }
             if let Some(&pgid) = group_of.get(&pid) {
                 tree.groups.insert(pgid);
+            }
+            if let Some(start) = start_of.get(&pid) {
+                tree.starts.insert(pid, start.clone());
             }
             pending.extend(children.get(&pid).into_iter().flatten());
         }
@@ -45,6 +53,32 @@ impl Tree {
     pub fn merge(&mut self, other: Tree) {
         self.pids.extend(other.pids);
         self.groups.extend(other.groups);
+        self.starts.extend(other.starts);
+    }
+
+    /// The tree's processes with their start times, to save and stop later.
+    pub fn saved(&self) -> Vec<(i32, String)> {
+        let mut saved: Vec<(i32, String)> = self.starts.iter().map(|(&pid, start)| (pid, start.clone())).collect();
+        saved.sort();
+        saved
+    }
+
+    /// SIGKILLs the processes in a saved tree that are still the same
+    /// processes, and returns how many it found.
+    pub fn kill_saved(saved: &[(i32, String)]) -> usize {
+        let live: HashMap<i32, String> = process_table().into_iter().map(|row| (row.pid, row.start)).collect();
+        let mut killed = 0;
+        for (pid, start) in saved {
+            if live.get(pid) == Some(start) {
+                // SAFETY: kill only sends a signal, to a process just checked
+                // to be the one saved.
+                unsafe {
+                    libc::kill(*pid, libc::SIGKILL);
+                }
+                killed += 1;
+            }
+        }
+        killed
     }
 
     pub fn signal(&self, signal: libc::c_int) {
@@ -75,7 +109,7 @@ const LINEAGE_DEPTH: usize = 3;
 
 impl Lineage {
     pub fn of_self() -> Lineage {
-        let parents: HashMap<i32, i32> = process_table().into_iter().map(|(pid, ppid, _)| (pid, ppid)).collect();
+        let parents: HashMap<i32, i32> = process_table().into_iter().map(|row| (row.pid, row.ppid)).collect();
         let mut links = Vec::new();
         let mut pid = std::process::id() as i32;
         while links.len() < LINEAGE_DEPTH {
@@ -91,20 +125,33 @@ impl Lineage {
     }
 
     pub fn is_broken(&self) -> bool {
-        let parents: HashMap<i32, i32> = process_table().into_iter().map(|(pid, ppid, _)| (pid, ppid)).collect();
+        let parents: HashMap<i32, i32> = process_table().into_iter().map(|row| (row.pid, row.ppid)).collect();
         self.links.iter().any(|(pid, ppid)| parents.get(pid) != Some(ppid))
     }
 }
 
-fn process_table() -> Vec<(i32, i32, i32)> {
-    let Ok(output) = Command::new("ps").args(["-A", "-o", "pid=,ppid=,pgid="]).output() else {
+struct Row {
+    pid: i32,
+    ppid: i32,
+    pgid: i32,
+    start: String,
+}
+
+fn process_table() -> Vec<Row> {
+    let Ok(output) = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid=,lstart="])
+        .output()
+    else {
         return Vec::new();
     };
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
-            let mut fields = line.split_whitespace().map(|f| f.parse::<i32>().ok());
-            Some((fields.next()??, fields.next()??, fields.next()??))
+            let mut fields = line.split_whitespace();
+            let mut number = || fields.next()?.parse::<i32>().ok();
+            let (pid, ppid, pgid) = (number()?, number()?, number()?);
+            let start = fields.collect::<Vec<_>>().join(" ");
+            Some(Row { pid, ppid, pgid, start })
         })
         .collect()
 }

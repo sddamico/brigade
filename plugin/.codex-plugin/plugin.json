@@ -12,7 +12,7 @@
     ],
     "category": "Developer Tools",
     "defaultPrompt": [
-      "Use $brigade to spin up a sol subagent to review this change.",
+      "Use $brigade to have opus review this change.",
       "Use $brigade to send a team of three neon subagents to research this."
     ],
     "developerName": "Stephen D'Amico",
@@ -32,5 +32,5 @@
   "name": "brigade",
   "repository": "https://github.com/sddamico/brigade",
   "skills": "./skills/",
-  "version": "0.8.1"
+  "version": "0.9.0"
 }
