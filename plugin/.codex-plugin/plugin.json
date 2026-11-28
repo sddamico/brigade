@@ -32,5 +32,5 @@
   "name": "brigade",
   "repository": "https://github.com/sddamico/brigade",
   "skills": "./skills/",
-  "version": "0.3.3"
+  "version": "0.3.4"
 }

@@ -63,7 +63,7 @@ pub fn limited(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&W
     format!(
         "{}[brigade] {} hit a usage limit in {harness}: {error}\n\
          [brigade] {harness}'s other agents usually share this limit, so don't retry, switch to another agent \
-         or answer in its place. Tell the user when it resets and let them choose what to do\n{}[brigade] logs: {}\n",
+         or answer in its place. Tell the user what it said, including when it resets if it says, and let them choose what to do\n{}[brigade] logs: {}\n",
         fell_back(record),
         record.agent.name,
         worktree_lines(record, worktree),

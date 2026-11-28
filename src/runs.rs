@@ -434,8 +434,9 @@ fn run_harness(
     };
 
     let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
     let last_message = fs::read_to_string(&last_message_file).ok();
-    match invocation::parse(record.agent.harness, &stdout, last_message.as_deref()) {
+    match invocation::parse(record.agent.harness, &stdout, &stderr, last_message.as_deref()) {
         Ok(reply) => Outcome::Done {
             session: reply.session,
             message: reply.message,
@@ -445,7 +446,6 @@ fn run_harness(
         Err(ParseFailure::Reported(error)) => Outcome::Failed { error },
         Err(ParseFailure::NoResult(error)) if status.success() => Outcome::Failed { error },
         Err(ParseFailure::NoResult(error)) => {
-            let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
             let tail = tail_lines(&stderr, 20);
             let detail = if tail.is_empty() {
                 String::new()

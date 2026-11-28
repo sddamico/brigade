@@ -33,7 +33,9 @@ case " $FAKE_LIMIT " in *" $name "*)
     codex)
       echo '{"type":"thread.started","thread_id":"codex-thread"}'
       echo '{"type":"turn.failed","error":{"message":"You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 14th, 2026 7:50 AM."}}' ;;
-    agy) printf '%s\n' '{"conversation_id":"agy-conversation","status":"ERROR","error":"RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).","finished_reason":"error"}' ;;
+    agy)
+      printf '%s\n' '{"conversation_id":"agy-conversation","status":"ERROR","response":"","error":"Your AI credits balance is too low to continue.","finished_reason":"error"}'
+      printf '%s\n' 'AGY_ERROR: {"status":"RESOURCE_EXHAUSTED","error_code":429,"retryable":false}' >&2 ;;
   esac
   exit 1 ;;
 esac
@@ -308,7 +310,7 @@ fn a_usage_limit_is_its_own_outcome() {
     assert_eq!(json.status.code(), Some(4));
     let value: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
     assert_eq!(value["status"], "limited");
-    assert!(value["error"].as_str().unwrap().contains("RESOURCE_EXHAUSTED"));
+    assert_eq!(value["error"], "Your AI credits balance is too low to continue.");
 }
 
 #[test]
