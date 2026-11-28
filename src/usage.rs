@@ -260,8 +260,8 @@ mod tests {
     #[test]
     fn reads_claudes_usage_text() {
         let text = "You are currently using your subscription to power your Claude Code usage\n\n\
-                    Current week (all models): 37% used · resets Dec 2, 2am (America/New_York)\n\
-                    Current week (Fable): 23% used · resets Dec 2, 2am (America/New_York)\n\n\
+                    Current week (all models): 37% used · resets Dec 2, 2am\n\
+                    Current week (Fable): 23% used · resets Dec 2, 2am\n\n\
                     Last 24h · 2319 requests · 22 sessions\n  96%  Check which models your subagents use\n";
         let now = accounts::local_epoch_for_tests(2026, 10, 27, 22, 0);
         let quotas = claude_quotas(text, now);

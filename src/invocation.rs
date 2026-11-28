@@ -285,8 +285,6 @@ pub fn parse(
             let session = v["conversation_id"].as_str().map(String::from);
             let status = v["status"].as_str().unwrap_or("no status");
             if status != "SUCCESS" {
-                // The JSON's error is only a message ("Your AI credits balance is too
-                // low to continue."); agy's AGY_ERROR line on stderr has the status.
                 // agy's error JSON is only a message ("Your AI credits balance is
                 // too low to continue."), so the AGY_ERROR line on stderr carries
                 // the status; a transport error names it in the message instead.

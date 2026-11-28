@@ -766,6 +766,11 @@ fn run_harness_once(
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
+        Err(e) if e.kind() == ErrorKind::NotFound && !invocation.cwd.is_dir() => {
+            return Outcome::Failed {
+                error: format!("can't run in {}: it no longer exists", invocation.cwd.display()),
+            };
+        }
         Err(e) if e.kind() == ErrorKind::NotFound => {
             return Outcome::Failed {
                 error: format!("`{}` isn't on PATH", invocation.program),
@@ -938,9 +943,10 @@ fn commit_message(record: &RunRecord, task: &str) -> String {
 /// The task's first line of words (not a code fence or a rule), cut at a word
 /// to fit 72 characters.
 fn subject(task: &str) -> String {
+    let fence = |l: &str| l.trim_start().starts_with("```") || l.trim_start().starts_with("~~~");
     let line = task
         .lines()
-        .find(|l| l.chars().any(char::is_alphanumeric))
+        .find(|l| !fence(l) && l.chars().any(char::is_alphanumeric))
         .unwrap_or("")
         .trim();
     if line.chars().count() <= 72 {
@@ -958,23 +964,33 @@ fn subject(task: &str) -> String {
 
 /// Deletes finished runs started longer ago than `keep`, and returns how many.
 /// A run's worktree goes with it if it's still clean at its starting commit:
-/// it was only kept so the run's session could be continued there.
-pub fn prune(settings: &Settings, keep: Duration) -> usize {
+/// it was only kept so the run's session could be continued there. A worktree
+/// is kept while a run that stays uses it, or while `starting_in`, the cwd of
+/// a run about to start, is inside it.
+pub fn prune(settings: &Settings, keep: Duration, starting_in: Option<&Path>) -> usize {
     // A run whose worker and waiter both died has nobody left to stop what it
     // started, so its first chance is here.
     for run in list(settings).iter().filter(|run| matches!(run.state, State::Lost)) {
         let _ = run.dir.reap_lost();
     }
     let cutoff = now().saturating_sub(keep.as_secs());
-    list(settings)
+    let (old, kept): (Vec<Run>, Vec<Run>) = list(settings)
         .into_iter()
-        .filter(|run| matches!(run.state, State::Finished(_)) && run.record.started_at <= cutoff)
+        .partition(|run| matches!(run.state, State::Finished(_)) && run.record.started_at <= cutoff);
+    let in_use: Vec<&Path> = kept
+        .iter()
+        .filter_map(|run| run.record.worktree.as_ref())
+        .map(|worktree| worktree.path.as_path())
+        .collect();
+    old.into_iter()
         .filter(|run| {
             if let Some(worktree) = run
                 .record
                 .worktree
                 .as_ref()
                 .filter(|_| run.record.access == Access::Write)
+                .filter(|w| !in_use.contains(&w.path.as_path()))
+                .filter(|w| starting_in.is_none_or(|cwd| !cwd.starts_with(&w.path)))
             {
                 worktree::tidy(worktree);
             }
@@ -1049,6 +1065,8 @@ mod tests {
     fn a_commit_subject_is_the_tasks_first_line_of_words_cut_at_a_word() {
         assert_eq!(subject("\n\n  Fix the parser\nmore"), "Fix the parser");
         assert_eq!(subject("```\nfn main() {}\n```"), "fn main() {}");
+        assert_eq!(subject("```diff\n- old\n+ new\n```\napply this"), "- old");
+        assert_eq!(subject("~~~\ncode first\n~~~"), "code first");
         let words = format!("{} yyyy zzzz more", "x".repeat(66));
         assert_eq!(subject(&words), format!("{} yyyy…", "x".repeat(66)));
         let split = format!("{} yyyyyy zzzz", "x".repeat(66));

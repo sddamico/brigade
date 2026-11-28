@@ -82,9 +82,13 @@ pub fn create(settings: &Settings, cwd: &Path, run_id: &str) -> Result<(Worktree
     let path = settings.worktrees_dir().join(name).join(run_id);
     let branch = format!("brigade/{run_id}");
     let path_arg = path.to_string_lossy();
+    let branch_ref = format!("refs/heads/{branch}");
+    let branch_existed = git(&root, &["rev-parse", "--verify", "--quiet", &branch_ref]).is_ok();
     if let Err(error) = git(&root, &["worktree", "add", "--quiet", "-b", &branch, &path_arg, "HEAD"]) {
         // `worktree add -b` makes the branch before it makes the directory.
-        let _ = git(&root, &["branch", "--quiet", "-D", &branch]);
+        if !branch_existed {
+            let _ = git(&root, &["branch", "--quiet", "-D", &branch]);
+        }
         return Err(error);
     }
     let base = git(&path, &["rev-parse", "HEAD"])?.trim().to_string();

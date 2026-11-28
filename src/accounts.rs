@@ -399,7 +399,17 @@ fn clock_time(clock: &str, meridiem: &str) -> Option<(i32, i32)> {
 /// or just "3:30pm (...)" for later today. The zone is the machine's own, which
 /// is the one Claude Code reports in.
 pub fn claude_reset(when: &str, now: u64) -> Option<u64> {
-    let when = when.split(" (").next()?.trim();
+    let (when, zone) = match when.split_once(" (") {
+        Some((when, zone)) => (when.trim(), zone.split(')').next()),
+        None => (when.trim(), None),
+    };
+    // brigade reads times in this machine's zone; one given in another zone
+    // would be off by the difference, so it isn't used.
+    if let (Some(zone), Some(local)) = (zone, local_zone())
+        && zone != local
+    {
+        return None;
+    }
     let (date, clock) = match when.rsplit_once(", ") {
         Some((date, clock)) => (Some(date), clock),
         None => (None, when),
@@ -487,6 +497,18 @@ fn local_epoch(year: i32, month: i32, day: i32, hour: i32, minute: i32) -> Optio
 }
 
 /// A time as the user's clock shows it: "2026-11-27 00:09 EST".
+/// This machine's time zone name ("America/New_York"), as the C library finds
+/// it: from $TZ, or else from where /etc/localtime links into the zoneinfo
+/// database. None when it can't tell.
+fn local_zone() -> Option<String> {
+    if let Ok(tz) = std::env::var("TZ") {
+        return Some(tz.trim_start_matches(':').to_string()).filter(|z| !z.is_empty());
+    }
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let target = target.to_string_lossy();
+    target.split_once("zoneinfo/").map(|(_, zone)| zone.to_string())
+}
+
 /// "2026-11-28 00:43:07", for log lines.
 pub fn local_timestamp(epoch: u64) -> String {
     let secs = epoch as libc::time_t;
@@ -632,17 +654,26 @@ mod tests {
     fn reads_claudes_reset_times() {
         let now = local_epoch(2026, 10, 27, 22, 0).unwrap();
         assert_eq!(
-            local_time(claude_reset("Dec 2, 2am (America/New_York)", now).unwrap())[..16],
+            local_time(claude_reset("Dec 2, 2am", now).unwrap())[..16],
             *"2026-12-02 02:00"
         );
         assert_eq!(
-            local_time(claude_reset("3:30pm (America/New_York)", now).unwrap())[..16],
+            local_time(claude_reset("3:30pm", now).unwrap())[..16],
             *"2026-11-28 15:30"
         );
         assert_eq!(
-            local_time(claude_reset("Jan 4, 9am (America/New_York)", now).unwrap())[..16],
+            local_time(claude_reset("Jan 4, 9am", now).unwrap())[..16],
             *"2027-01-04 09:00"
         );
         assert_eq!(utc_epoch("2026-12-03T12:42:51Z"), Some(1_796_301_771));
+    }
+
+    #[test]
+    fn a_claude_reset_in_another_zone_isnt_read_as_this_ones() {
+        let now = local_epoch_for_tests(2026, 10, 27, 22, 0);
+        if let Some(zone) = local_zone() {
+            assert!(claude_reset(&format!("1am ({zone})"), now).is_some());
+            assert_eq!(claude_reset("1am (Mars/Olympus_Mons)", now), None);
+        }
     }
 }

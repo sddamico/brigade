@@ -122,6 +122,8 @@ impl Sandbox {
             .env("HOME", self.root())
             .env("XDG_CONFIG_HOME", self.root().join("config"))
             .env("XDG_STATE_HOME", self.root().join("state"))
+            // The zone the fake harnesses give their reset times in.
+            .env("TZ", "America/New_York")
             .env("FAKE_LOG", self.root().join("calls"))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_AUTHOR_NAME", "t")
@@ -1949,4 +1951,65 @@ fn cancel_json_on_a_finished_run_says_it_had_finished() {
     let value: serde_json::Value = serde_json::from_slice(&cancelled.stdout).unwrap();
     assert_eq!(value["already_finished"], true);
     assert_eq!(value["status"], "done");
+}
+
+/// A finished worktree run that changed nothing, and its worktree.
+fn unchanged_worktree_run(sandbox: &Sandbox) -> (String, PathBuf) {
+    let output = sandbox.brigade(&["run", "hydrogen", "--write", "--worktree", "--json", "look"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let path = PathBuf::from(value["run"]["worktree"]["path"].as_str().unwrap());
+    assert!(path.is_dir());
+    (value["run"]["id"].as_str().unwrap().to_string(), path)
+}
+
+#[test]
+fn pruning_keeps_a_worktree_a_running_run_uses() {
+    let sandbox = Sandbox::new();
+    sandbox.repo();
+    let (_, worktree) = unchanged_worktree_run(&sandbox);
+    let started = sandbox
+        .command(&[
+            "run",
+            "hydrogen",
+            "--write",
+            "--detach",
+            "--cwd",
+            worktree.to_str().unwrap(),
+            "more",
+        ])
+        .env("FAKE_SLEEP", "30")
+        .output()
+        .unwrap();
+    let id = run_id(&stdout(&started));
+    sandbox.harness_pid("agy");
+
+    sandbox.brigade(&["runs", "--prune"]);
+    assert!(worktree.is_dir(), "prune removed a worktree a running run is in");
+    sandbox.brigade(&["cancel", &id]);
+}
+
+#[test]
+fn continuing_a_run_past_its_week_keeps_the_worktree_it_runs_in() {
+    let sandbox = Sandbox::new();
+    sandbox.repo();
+    let (id, worktree) = unchanged_worktree_run(&sandbox);
+    let record = sandbox.root().join("state/brigade/runs").join(&id).join("run.json");
+    let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    value["started_at"] = serde_json::json!(value["started_at"].as_u64().unwrap() - 8 * 24 * 60 * 60);
+    fs::write(&record, value.to_string()).unwrap();
+
+    let output = sandbox.brigade(&[
+        "run",
+        "hydrogen",
+        "--write",
+        "--cwd",
+        worktree.to_str().unwrap(),
+        "more",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(worktree.is_dir());
+    assert!(
+        !sandbox.root().join("state/brigade/runs").join(&id).exists(),
+        "the old run is pruned"
+    );
 }

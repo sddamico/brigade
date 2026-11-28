@@ -99,6 +99,6 @@ A reply that came through brigade ends with `[brigade]` lines: the run, and for 
 
 ## Reporting back
 
-A forwarder's reply always includes the `[brigade]` lines. One without them didn't come from brigade: the forwarder answered by itself. Don't use it or pass it on; start the agent again, or run `brigade run` from the shell.
+A forwarder's reply always includes the `[brigade]` lines. One without them didn't come from brigade: the forwarder answered by itself. Don't use it or pass it on; start the agent again, or run `brigade run` from the shell. That doesn't apply when the user declined the forwarder's command or stopped it: tell the user the agent didn't run, and don't run it yourself.
 
 The user sees only what you relay. Say which agent did what, and pass on findings with their evidence. Don't present an agent's claims as checked unless you checked them.

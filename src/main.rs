@@ -258,7 +258,7 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Runs { prune: true, .. } => {
-            let pruned = runs::prune(&settings, Duration::ZERO);
+            let pruned = runs::prune(&settings, Duration::ZERO, None);
             println!("deleted {pruned} finished run(s)");
             Ok(ExitCode::SUCCESS)
         }
@@ -371,7 +371,15 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         }
         routes = takers;
     }
-    let mut routes = routes.into_iter().map(expanded).collect::<Result<Vec<_>, _>>()?;
+    let first_account = routes[0].account.name.clone();
+    let mut routes = routes
+        .into_iter()
+        .enumerate()
+        .map(|(i, route)| match (i, expanded(route)) {
+            (1.., Err(error)) => Err(format!("{error}; --account {first_account} runs without that route")),
+            (_, result) => result,
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let agent = routes.remove(0);
     let effort = args.effort.or(agent.effort);
     if args.resume.is_some() && !agent.harness.can_resume() {
@@ -398,12 +406,13 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
             ));
         }
         for entry in fallback_routes {
-            let route = expanded(entry.agent.clone()).map_err(|error| {
-                format!(
-                    "{error}; it's {}'s fallback, so --no-fallback runs without it",
-                    agent.name
-                )
-            })?;
+            let skip = if args.fallback.is_some() {
+                "leave out --fallback to run without it"
+            } else {
+                "--no-fallback runs without it"
+            };
+            let route = expanded(entry.agent.clone())
+                .map_err(|error| format!("{error}; it's {}'s fallback, so {skip}", agent.name))?;
             routes.push(route);
         }
     }
@@ -419,7 +428,7 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     if !cwd.is_dir() {
         return Err(format!("can't use {} as the cwd: it isn't a directory", cwd.display()));
     }
-    runs::prune(settings, runs::KEEP_RUNS);
+    runs::prune(settings, runs::KEEP_RUNS, Some(&cwd));
 
     let (id, dir) = RunDir::allocate(settings, &agent.name)?;
     let (worktree, cwd) = if args.worktree {
