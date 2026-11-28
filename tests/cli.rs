@@ -265,6 +265,10 @@ fn user_roster_agents_get_their_env_expanded() {
         "{}",
         stderr(&unset)
     );
+    assert!(
+        !sandbox.root().join("state/brigade/runs").exists(),
+        "the run started before its variables were checked"
+    );
 
     let output = sandbox
         .command(&["run", "lab-claude", "hello"])

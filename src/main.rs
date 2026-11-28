@@ -464,8 +464,11 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
 /// reported before anything starts and the record names the model the harness
 /// really gets.
 fn expanded(mut agent: Agent) -> Result<Agent, String> {
-    agent.model = expand(&agent.model, &env_var)
-        .map_err(|UnsetVar(name)| format!("`{}` needs ${name}, which isn't set", agent.name))?;
+    let unset = |UnsetVar(name)| format!("`{}` needs ${name}, which isn't set", agent.name);
+    for value in agent.env.values().chain(&agent.args) {
+        expand(value, &env_var).map_err(unset)?;
+    }
+    agent.model = expand(&agent.model, &env_var).map_err(unset)?;
     Ok(agent)
 }
 
