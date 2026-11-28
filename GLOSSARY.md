@@ -28,6 +28,8 @@
 
 **Cancelled run**: a run stopped by `brigade cancel`, by Ctrl-C on a foreground run, or by its lease lapsing.
 
+**Usage limit**: the harness's account running out of usage, such as Claude Code's session or weekly limit, Codex's usage limit or agy's quota. A run that hits one ends as limited, with exit code 4, apart from other failures, because retrying it before the limit resets fails the same way.
+
 **Team**: several runs of one agent at once, one task each.
 
 **Worktree**: a git worktree brigade makes for a run started with `--worktree`, on branch `brigade/<run id>`, so the members of a write team don't edit the same checkout.

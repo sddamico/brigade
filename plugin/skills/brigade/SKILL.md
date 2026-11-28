@@ -75,12 +75,18 @@ Runs nest at most two deep: a brigade agent can start one more level of agents, 
 
 Stopping a forwarder stops its run: a run that nobody has waited on for 90 seconds is cancelled, along with everything its harness started. `brigade cancel <run id>` stops one at once.
 
+## When a run fails
+
+Pass the error on as brigade gave it.
+
+A run that ends with `[brigade] <agent> hit a usage limit in <harness>` (exit code 4 from the shell) ran out of the harness's account usage. The harness's message after it says when the limit resets, when the harness says. Don't retry it, and don't start more runs in that harness: its other agents usually share the same account limit. Don't swap in a different agent either. Tell the user which agent hit its limit and when it resets, and let them choose what to do. On a team, report what the other members finished.
+
 ## Following up
 
 A reply that came through brigade ends with `[brigade]` lines: the run, and for a session the `brigade run ... --resume <session> --cwd <dir>` command that continues it. Send the follow-up to the same forwarder (`SendMessage` in Claude Code, `followup_task` in Codex); it continues the session itself. A new forwarder needs the session and directory in its prompt ("continue session `<id>` in `<dir>`"), or you can run that command yourself. Follow up with your own native subagents the same way.
 
 ## Reporting back
 
-A forwarder's reply always ends with the `[brigade]` lines. One without them didn't come from brigade: the forwarder answered by itself. Don't use it or pass it on; start the agent again, or run `brigade run` from the shell.
+A forwarder's reply always includes the `[brigade]` lines. One without them didn't come from brigade: the forwarder answered by itself. Don't use it or pass it on; start the agent again, or run `brigade run` from the shell.
 
 The user sees only what you relay. Say which agent did what, and pass on findings with their evidence. Don't present an agent's claims as checked unless you checked them.

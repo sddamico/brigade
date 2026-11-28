@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const STILL_RUNNING: u8 = 3;
+const LIMITED: u8 = 4;
 const INTERRUPTED_EXIT: u8 = 130;
 const ORPHAN_CHECK_EVERY: Duration = Duration::from_secs(2);
 
@@ -292,6 +293,15 @@ fn print_state(record: &RunRecord, dir: &RunDir, state: &State, json: bool, wait
                 );
             }
             ExitCode::FAILURE
+        }
+        State::Finished(Outcome::Limited { error }) => {
+            if !json {
+                eprint!(
+                    "{}",
+                    report::limited(record, error, dir.path(), dir.worktree_state().as_ref())
+                );
+            }
+            ExitCode::from(LIMITED)
         }
         State::Finished(Outcome::Cancelled { reason }) => {
             if !json {

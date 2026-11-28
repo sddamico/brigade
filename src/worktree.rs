@@ -102,19 +102,24 @@ pub fn existing(settings: &Settings, cwd: &Path) -> Option<Worktree> {
     })
 }
 
-/// Commits everything a finished write run changed, on the worktree's branch.
+/// Commits whatever a finished write run left uncommitted, on the worktree's
+/// branch. An agent that committed its work itself has nothing left to commit,
+/// but its commits still count as the run's changes.
 pub fn commit(worktree: &Worktree, message: &str) -> WorktreeState {
-    match git(&worktree.path, &["status", "--porcelain"]) {
-        Ok(status) if status.trim().is_empty() => return WorktreeState::Unchanged,
-        Ok(_) => {}
+    let dirty = match git(&worktree.path, &["status", "--porcelain"]) {
+        Ok(status) => !status.trim().is_empty(),
         Err(error) => return WorktreeState::Uncommitted { error },
+    };
+    if dirty
+        && let Err(error) = git(&worktree.path, &["add", "--all"])
+            .and_then(|_| git(&worktree.path, &["commit", "--quiet", "-m", message]))
+    {
+        return WorktreeState::Uncommitted { error };
     }
-    let committed = git(&worktree.path, &["add", "--all"])
-        .and_then(|_| git(&worktree.path, &["commit", "--quiet", "-m", message]))
-        .and_then(|_| git(&worktree.path, &["rev-parse", "--short", "HEAD"]));
-    match committed {
-        Ok(commit) => WorktreeState::Committed {
-            commit: commit.trim().to_string(),
+    match git(&worktree.path, &["rev-parse", "HEAD"]) {
+        Ok(head) if head.trim() == worktree.base => WorktreeState::Unchanged,
+        Ok(head) => WorktreeState::Committed {
+            commit: head.trim().chars().take(7).collect(),
         },
         Err(error) => WorktreeState::Uncommitted { error },
     }

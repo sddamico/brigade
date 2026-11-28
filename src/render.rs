@@ -176,13 +176,30 @@ fn asks_for(name: &str) -> String {
     )
 }
 
-fn forwarder_description(agent: &Agent) -> String {
+fn forwarder_description(agent: &Agent, host: Harness) -> String {
     format!(
         "{}, run in its own CLI through brigade. {} Say in the prompt if the task should change files, \
-         which model or effort to use, or which session to continue.",
+         which model or effort to use, or which session to continue.{}",
         agent.description,
         asks_for(&agent.name),
+        worktree_hint(host),
     )
+}
+
+/// Hosts read subagent descriptions every time but load the skill only
+/// sometimes, so the one thing that doubles up worktrees is said here.
+fn worktree_hint(host: Harness) -> &'static str {
+    match host {
+        Harness::Claude => {
+            " For its own worktree, write \"use your own worktree\" in the prompt and leave the Agent call's \
+             `isolation` unset; brigade makes the worktree."
+        }
+        Harness::Agy => {
+            " For its own worktree, write \"use your own worktree\" in the prompt and leave `Workspace` unset; \
+             brigade makes the worktree."
+        }
+        Harness::Codex => " For its own worktree, write \"use your own worktree\" in the message.",
+    }
 }
 
 /// The host's own family, which it runs on its ordinary subagents, and how.
@@ -213,6 +230,7 @@ fn forward_description(host: Harness, agents: &[&Agent]) -> String {
         }
         None => description.push_str(" Also for neon or hydrogen when this session runs on another model."),
     }
+    description.push_str(worktree_hint(host));
     description
 }
 
@@ -273,17 +291,18 @@ instructions the options below cover:
    - `--model <id>` when it names a model other than the agent's own
    - `--effort <level>` when it names one of: {levels}. If it names an effort that isn't on that list, don't \
 run anything: reply that {name} doesn't take that effort and which ones it does
-   - `--worktree`, together with `--write`, only when the request asks for a worktree in so many words
+   - `--worktree`, together with `--write`, when the request asks for its own worktree or a git worktree, in \
+any wording (\"use your own worktree\", \"work in a worktree of the repo\"). Never add it otherwise
    - `--resume <session> --cwd <dir>` when it continues an earlier run; both come from that run's \
 `[brigade] continue it with:` line
 
 2. That prints a run id. Wait for it with `brigade wait <run id> --timeout {WAIT_SLICE_SECS}`. While it reports \
 that the run is still running, call it again.
 
-3. Reply with the final `brigade wait` output copied character for character: every line, including all the \
-`[brigade]` lines at the end, with nothing added, removed, reformatted or summarized. The `[brigade]` lines \
-tell the caller how to continue the session and where the changes are. If brigade fails, reply with its \
-error output the same way.
+3. Your whole reply is the final `brigade wait` output, copied character for character: every line, \
+including all the `[brigade]` lines at the end. Nothing before it, nothing after it, no summary, no code \
+fence, no reformatting. The `[brigade]` lines tell the caller how to continue the session and where the \
+changes are. If brigade fails, reply with its error output the same way.
 
 4. You may get follow-up messages after your reply. Each one is a new task for {name} in the same session: \
 run it through steps 1 to 3, adding the `--resume <session> --cwd <dir>` (and any `--write`, `--model` or \
@@ -302,7 +321,7 @@ fn yaml_str(value: &str) -> String {
 fn claude_agent(agent: &Agent, agents: &[&Agent]) -> String {
     claude_forwarder(
         &agent.name,
-        &forwarder_description(agent),
+        &forwarder_description(agent, Harness::Claude),
         &forwarder_body(Some(agent), Harness::Claude, agents, "Bash"),
     )
 }
@@ -334,7 +353,7 @@ struct CodexRole<'a> {
 fn codex_agent(agent: &Agent, agents: &[&Agent]) -> String {
     codex_role(&CodexRole {
         name: &agent.name,
-        description: &forwarder_description(agent),
+        description: &forwarder_description(agent, Harness::Codex),
         model: CODEX_FORWARDER_MODEL,
         model_reasoning_effort: CODEX_FORWARDER_EFFORT,
         developer_instructions: &forwarder_body(Some(agent), Harness::Codex, agents, "shell"),
@@ -358,7 +377,7 @@ fn codex_role(role: &CodexRole) -> String {
 fn agy_agent(agent: &Agent, agents: &[&Agent]) -> String {
     agy_forwarder(
         &agent.name,
-        &forwarder_description(agent),
+        &forwarder_description(agent, Harness::Agy),
         &forwarder_body(Some(agent), Harness::Agy, agents, "run_command"),
     )
 }

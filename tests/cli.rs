@@ -23,7 +23,18 @@ if [ -n "$FAKE_DETACHED_CHILD" ]; then
 fi
 [ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
 [ -n "$FAKE_WRITE" ] && printf 'changed\n' > "$FAKE_WRITE"
+[ -n "$FAKE_COMMIT" ] && printf 'mine\n' > "$FAKE_COMMIT" && git add -A && git commit -qm "agent's own commit"
 if [ -n "$FAKE_FAIL" ]; then echo "fake $name: $FAKE_FAIL" >&2; exit 1; fi
+if [ -n "$FAKE_LIMIT" ]; then
+  case "$name" in
+    claude) printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"api_error":"rate_limit","result":"You'"'"'ve hit your session limit · resets 1am (America/New_York)","session_id":"claude-session"}' ;;
+    codex)
+      echo '{"type":"thread.started","thread_id":"codex-thread"}'
+      echo '{"type":"turn.failed","error":{"message":"You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 14th, 2026 7:50 AM."}}' ;;
+    agy) printf '%s\n' '{"conversation_id":"agy-conversation","status":"ERROR","error":"RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).","finished_reason":"error"}' ;;
+  esac
+  exit 1
+fi
 case "$name" in
   claude) echo '{"type":"result","subtype":"success","is_error":false,"result":"claude reply","session_id":"claude-session"}' ;;
   codex)
@@ -258,7 +269,7 @@ fn a_failing_harness_reports_its_error_and_logs() {
     let sandbox = Sandbox::new();
     let output = sandbox
         .command(&["run", "astra", "go"])
-        .env("FAKE_FAIL", "quota exhausted")
+        .env("FAKE_FAIL", "disk full")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
@@ -267,8 +278,35 @@ fn a_failing_harness_reports_its_error_and_logs() {
         err.contains("[brigade] astra failed: `codex` exited with exit status: 1"),
         "{err}"
     );
-    assert!(err.contains("fake codex: quota exhausted"), "{err}");
+    assert!(err.contains("fake codex: disk full"), "{err}");
     assert!(err.contains("[brigade] logs: "), "{err}");
+}
+
+#[test]
+fn a_usage_limit_is_its_own_outcome() {
+    let sandbox = Sandbox::new();
+    let output = sandbox
+        .command(&["run", "sol", "go"])
+        .env("FAKE_LIMIT", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    let err = stderr(&output);
+    assert!(
+        err.contains("[brigade] sol hit a usage limit in Codex: You’ve hit your usage limit."),
+        "{err}"
+    );
+    assert!(err.contains("try again at Nov 14th, 2026 7:50 AM."), "{err}");
+
+    let json = sandbox
+        .command(&["run", "neon", "--json", "go"])
+        .env("FAKE_LIMIT", "1")
+        .output()
+        .unwrap();
+    assert_eq!(json.status.code(), Some(4));
+    let value: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(value["status"], "limited");
+    assert!(value["error"].as_str().unwrap().contains("RESOURCE_EXHAUSTED"));
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
@@ -627,4 +665,24 @@ fn a_waiter_whose_caller_was_killed_stops_holding_the_run() {
     std::thread::sleep(std::time::Duration::from_secs(5));
     assert!(!is_alive(waiter), "the orphaned waiter kept going");
     assert!(!is_alive(harness), "the run outlived its killed caller");
+}
+
+#[test]
+fn an_agent_that_commits_its_own_work_still_counts_as_changing_something() {
+    let sandbox = Sandbox::new();
+    let work = sandbox.repo();
+    let output = sandbox
+        .command(&["run", "neon", "--write", "--worktree", "go"])
+        .env("FAKE_COMMIT", "self.txt")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("[brigade] its changes are committed as "), "{out}");
+    assert!(!out.contains("changed nothing"), "{out}");
+    let branch = out.split("on branch ").nth(1).unwrap().split(',').next().unwrap();
+    assert_eq!(
+        git_in(&work, &["log", "--format=%s", &format!("main..{branch}")]).trim(),
+        "agent's own commit"
+    );
 }

@@ -54,6 +54,16 @@ pub fn failed(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&Wo
     )
 }
 
+pub fn limited(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&WorktreeState>) -> String {
+    format!(
+        "[brigade] {} hit a usage limit in {}: {error}\n{}[brigade] logs: {}\n",
+        record.agent.name,
+        record.agent.harness.product(),
+        worktree_lines(record, worktree),
+        logs.display()
+    )
+}
+
 pub fn cancelled(record: &RunRecord, reason: &str, logs: &Path, worktree: Option<&WorktreeState>) -> String {
     format!(
         "[brigade] run {} was cancelled: {reason}\n{}[brigade] logs: {}\n",
@@ -143,6 +153,9 @@ pub fn state_json(record: &RunRecord, state: &State, logs: &Path, worktree: Opti
         }
         State::Finished(Outcome::Failed { error }) => {
             json!({ "run": record, "status": "failed", "error": error, "logs": logs })
+        }
+        State::Finished(Outcome::Limited { error }) => {
+            json!({ "run": record, "status": "limited", "error": error, "logs": logs })
         }
         State::Finished(Outcome::Cancelled { reason }) => {
             json!({ "run": record, "status": "cancelled", "reason": reason, "logs": logs })

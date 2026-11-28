@@ -139,21 +139,37 @@ pub fn build(req: &Request, var: &dyn Fn(&str) -> Option<String>) -> Result<Invo
     })
 }
 
+#[derive(Debug, PartialEq)]
+pub enum ParseFailure {
+    /// The account the harness runs on is out of usage. The message says when
+    /// it resets, when the harness says.
+    Limited(String),
+    /// The harness reported its own error, which already says what went wrong.
+    Reported(String),
+    /// The harness left no usable result; its stderr may explain why.
+    NoResult(String),
+}
+
 /// Reads the harness's final output. `last_message` is the file Codex wrote its
 /// final message to, when it wrote one.
-pub fn parse(harness: Harness, stdout: &str, last_message: Option<&str>) -> Result<Reply, String> {
+pub fn parse(harness: Harness, stdout: &str, last_message: Option<&str>) -> Result<Reply, ParseFailure> {
     match harness {
         Harness::Claude => {
             let v: Value = serde_json::from_str(stdout.trim())
-                .map_err(|_| "Claude Code didn't print a JSON result".to_string())?;
+                .map_err(|_| ParseFailure::NoResult("Claude Code didn't print a JSON result".to_string()))?;
             let session = v["session_id"].as_str().map(String::from);
             let result = v["result"].as_str().unwrap_or_default().to_string();
             let subtype = v["subtype"].as_str().unwrap_or("no result");
             if v["is_error"].as_bool() == Some(true) || subtype != "success" {
-                return Err(if result.is_empty() {
+                let error = if result.is_empty() {
                     format!("Claude Code ended with {subtype}")
                 } else {
                     result
+                };
+                return Err(if v["api_error"] == "rate_limit" {
+                    ParseFailure::Limited(error)
+                } else {
+                    ParseFailure::Reported(error)
                 });
             }
             Ok(Reply {
@@ -186,7 +202,16 @@ pub fn parse(harness: Harness, stdout: &str, last_message: Option<&str>) -> Resu
                 }
             }
             if !completed {
-                return Err(failure.unwrap_or_else(|| "Codex stopped before finishing the turn".to_string()));
+                return Err(match failure {
+                    // Codex's JSON events carry only the message, not the error's kind.
+                    Some(failure)
+                        if failure.contains("hit your usage limit") || failure.contains("429 Too Many Requests") =>
+                    {
+                        ParseFailure::Limited(failure)
+                    }
+                    Some(failure) => ParseFailure::Reported(failure),
+                    None => ParseFailure::NoResult("Codex stopped before finishing the turn".to_string()),
+                });
             }
             let message = last_message
                 .filter(|m| !m.trim().is_empty())
@@ -200,14 +225,25 @@ pub fn parse(harness: Harness, stdout: &str, last_message: Option<&str>) -> Resu
         }
         Harness::Agy => {
             let v: Value = serde_json::from_str(stdout.trim())
-                .map_err(|_| "Antigravity didn't print a JSON result".to_string())?;
+                .map_err(|_| ParseFailure::NoResult("Antigravity didn't print a JSON result".to_string()))?;
             let session = v["conversation_id"].as_str().map(String::from);
             let status = v["status"].as_str().unwrap_or("no status");
             if status != "SUCCESS" {
-                return Err(v["error"]
-                    .as_str()
-                    .map(String::from)
-                    .unwrap_or_else(|| format!("Antigravity ended with {status}")));
+                return Err(match v["error"].as_str() {
+                    Some(error)
+                        if [
+                            "RESOURCE_EXHAUSTED",
+                            "Resource has been exhausted",
+                            "exhausted your quota",
+                        ]
+                        .iter()
+                        .any(|sign| error.contains(sign)) =>
+                    {
+                        ParseFailure::Limited(error.to_string())
+                    }
+                    Some(error) => ParseFailure::Reported(error.to_string()),
+                    None => ParseFailure::NoResult(format!("Antigravity ended with {status}")),
+                });
             }
             let message = v["response"].as_str().unwrap_or_default().trim_end().to_string();
             Ok(Reply { session, message })
@@ -395,7 +431,7 @@ mod tests {
         let err = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"s-1"}"#;
         assert_eq!(
             parse(Harness::Claude, err, None),
-            Err("Claude Code ended with error_max_turns".into())
+            Err(ParseFailure::Reported("Claude Code ended with error_max_turns".into()))
         );
     }
 
@@ -426,7 +462,10 @@ mod tests {
             r#"{"type":"turn.failed","error":{"message":"model not found"}}"#,
         ]
         .join("\n");
-        assert_eq!(parse(Harness::Codex, &out, None), Err("model not found".into()));
+        assert_eq!(
+            parse(Harness::Codex, &out, None),
+            Err(ParseFailure::Reported("model not found".into()))
+        );
     }
 
     #[test]
@@ -439,8 +478,12 @@ mod tests {
                 message: "pong".into()
             })
         );
-        let err = r#"{"conversation_id":"c-1","status":"ERROR","error":"quota exhausted","finished_reason":"error"}"#;
-        assert_eq!(parse(Harness::Agy, err, None), Err("quota exhausted".into()));
+        let err =
+            r#"{"conversation_id":"c-1","status":"ERROR","error":"model not available","finished_reason":"error"}"#;
+        assert_eq!(
+            parse(Harness::Agy, err, None),
+            Err(ParseFailure::Reported("model not available".into()))
+        );
     }
 
     #[test]
@@ -468,5 +511,34 @@ mod tests {
             let flag = if harness == Harness::Codex { "-m" } else { "--model" };
             assert!(has_pair(&inv.args, flag, "override-model"), "{harness}: {:?}", inv.args);
         }
+    }
+    /// The messages are the ones each CLI printed when it hit a real limit.
+    #[test]
+    fn usage_limits_are_told_apart_from_other_failures() {
+        let claude = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"api_error":"rate_limit","result":"You've hit your session limit · resets 1am (America/New_York)","session_id":"s-1"}"#;
+        assert_eq!(
+            parse(Harness::Claude, claude, None),
+            Err(ParseFailure::Limited(
+                "You've hit your session limit · resets 1am (America/New_York)".into()
+            ))
+        );
+
+        let codex_limit = "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 14th, 2026 7:50 AM.";
+        let codex = [
+            r#"{"type":"thread.started","thread_id":"t-1"}"#.to_string(),
+            serde_json::json!({"type": "turn.failed", "error": {"message": codex_limit}}).to_string(),
+        ]
+        .join("\n");
+        assert_eq!(
+            parse(Harness::Codex, &codex, None),
+            Err(ParseFailure::Limited(codex_limit.into()))
+        );
+
+        let agy_limit = "generating and executing: transport error (ResourceExhausted, HTTP 429): Resource has been exhausted (e.g. check quota).: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).";
+        let agy = serde_json::json!({"conversation_id": "c-1", "status": "ERROR", "error": agy_limit, "finished_reason": "error"});
+        assert_eq!(
+            parse(Harness::Agy, &agy.to_string(), None),
+            Err(ParseFailure::Limited(agy_limit.into()))
+        );
     }
 }

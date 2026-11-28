@@ -9,7 +9,7 @@
 //! subagent, or the session it belongs to, stops the waiting and so the work.
 
 use crate::harness::{Access, Effort};
-use crate::invocation::{self, Request};
+use crate::invocation::{self, ParseFailure, Request};
 use crate::process::Tree;
 use crate::roster::Agent;
 use crate::settings::{DEPTH_VAR, Settings};
@@ -49,9 +49,20 @@ pub struct RunRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum Outcome {
-    Done { session: Option<String>, message: String },
-    Failed { error: String },
-    Cancelled { reason: String },
+    Done {
+        session: Option<String>,
+        message: String,
+    },
+    Failed {
+        error: String,
+    },
+    /// The harness's account ran out of usage, so retrying now would fail too.
+    Limited {
+        error: String,
+    },
+    Cancelled {
+        reason: String,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -246,7 +257,7 @@ pub fn execute(record: &RunRecord, dir: &RunDir, lease: Duration, var: &dyn Fn(&
     if let Some(worktree) = &record.worktree {
         let state = match &outcome {
             Outcome::Done { .. } => worktree::commit(worktree, &commit_message(record, task.as_deref().unwrap_or(""))),
-            Outcome::Failed { .. } | Outcome::Cancelled { .. } => worktree::tidy(worktree),
+            Outcome::Failed { .. } | Outcome::Limited { .. } | Outcome::Cancelled { .. } => worktree::tidy(worktree),
         };
         let _ = write_atomic(
             &dir.file("worktree.json"),
@@ -371,8 +382,11 @@ fn run_harness(
             session: reply.session,
             message: reply.message,
         },
-        Err(error) if status.success() => Outcome::Failed { error },
-        Err(error) => {
+        // The harness's own error already says it all; its stderr would repeat it.
+        Err(ParseFailure::Limited(error)) => Outcome::Limited { error },
+        Err(ParseFailure::Reported(error)) => Outcome::Failed { error },
+        Err(ParseFailure::NoResult(error)) if status.success() => Outcome::Failed { error },
+        Err(ParseFailure::NoResult(error)) => {
             let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
             let tail = tail_lines(&stderr, 20);
             let detail = if tail.is_empty() {
