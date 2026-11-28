@@ -1,11 +1,12 @@
 //! What each account can take right now, for `brigade capacity` and the
 //! scheduler that reads it.
 
-use crate::accounts::{self, Limit, Usage};
+use crate::accounts::{self, Limit, Quota, Usage};
 use crate::invocation::expand;
 use crate::roster::Roster;
 use crate::runs::{self, State};
 use crate::settings::Settings;
+use crate::usage;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -22,7 +23,12 @@ pub struct AccountCapacity {
     pub limit: Option<Limit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    /// Whether the account has a free slot and no account-wide limit.
+    /// The quotas the harness reported when last asked, by `capacity --refresh`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub quotas: Vec<Quota>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quotas_read_at: Option<u64>,
+    /// Whether a run on at least one of its agents would start at once.
     pub free: bool,
 }
 
@@ -68,12 +74,16 @@ pub fn capacity(
             };
             let (running, waiting) = (count(State::Running), count(State::Waiting));
             let state = accounts::load(settings, &account);
-            let limit = state.limit.clone().filter(|l| now < l.free_at());
+            // A limit or used-up quota on every model is the account's.
+            let limit = state.limit_on("", now).map(|(limit, _)| limit);
             let free = limit.is_none() && max_runs.is_none_or(|max| running < max as usize);
-            let agents = agents
+            let agents: Vec<AgentCapacity> = agents
                 .into_iter()
                 .map(|(name, model)| {
-                    let limit = state.models.get(&model).filter(|l| now < l.free_at()).cloned();
+                    let limit = state
+                        .limit_on(&model, now)
+                        .filter(|(_, scope)| scope.is_some())
+                        .map(|(limit, _)| limit);
                     AgentCapacity {
                         free: free && limit.is_none(),
                         name,
@@ -82,6 +92,7 @@ pub fn capacity(
                     }
                 })
                 .collect();
+            let free = agents.iter().any(|a| a.free);
             AccountCapacity {
                 account,
                 agents,
@@ -90,8 +101,33 @@ pub fn capacity(
                 waiting,
                 limit,
                 usage: state.usage,
+                quotas: state.quotas,
+                quotas_read_at: state.quotas_read_at,
                 free,
             }
         })
         .collect()
+}
+
+/// Reads every account's quotas from its harness, all at once since each read
+/// takes a few seconds, and records them. Returns the accounts it couldn't
+/// read, with why.
+pub fn refresh(settings: &Settings, roster: &Roster, now: u64) -> Vec<(String, String)> {
+    let var = |name: &str| std::env::var(name).ok();
+    let readable: Vec<_> = roster.accounts().iter().filter(|a| a.harness.is_some()).collect();
+    let results: Vec<(String, Result<Vec<Quota>, String>)> = std::thread::scope(|scope| {
+        let reads: Vec<_> = readable
+            .iter()
+            .map(|account| scope.spawn(move || (account.name.clone(), usage::read(account, &var, now))))
+            .collect();
+        reads.into_iter().filter_map(|read| read.join().ok()).collect()
+    });
+    let mut failures = Vec::new();
+    for (account, result) in results {
+        match result.and_then(|quotas| accounts::record_quotas(settings, &account, quotas, now)) {
+            Ok(()) => {}
+            Err(error) => failures.push((account, error)),
+        }
+    }
+    failures
 }

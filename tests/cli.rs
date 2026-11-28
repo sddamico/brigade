@@ -16,6 +16,20 @@ echo $$ > "$log/pid"
 echo call >> "$log/calls"
 : > "$log/args"
 for arg in "$@"; do printf '%s\n--\n' "$arg" >> "$log/args"; done
+if [ "$name" = codex ] && [ "$1" = app-server ]; then
+  head -n 3 > /dev/null
+  echo '{"jsonrpc":"2.0","id":1,"result":{}}'
+  echo '{"jsonrpc":"2.0","id":2,"result":{"rateLimitsByLimitId":{"codex":{"normalModelSlug":null,"primary":{"usedPercent":100,"windowDurationMins":300,"resetsAt":1900000000},"secondary":{"usedPercent":40,"windowDurationMins":10080,"resetsAt":1900100000}}}}}'
+  exit 0
+fi
+if [ "$name" = claude ] && [ "$2" = /usage ]; then
+  printf 'Current week (all models): 37%% used · resets Dec 2, 2am (America/New_York)\nCurrent week (Fable): 23%% used · resets Dec 2, 2am (America/New_York)\n'
+  exit 0
+fi
+if [ "$name" = agy ] && [ "$1" = --print=/usage ]; then
+  printf '%s\n' '{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","description":"Models within this group: Gemini 4 Neon, Gemini 4 Hydrogen","buckets":[{"window":"weekly","remaining_fraction":0,"reset_time":"2030-03-17T17:46:40Z"}]},{"name":"Claude and GPT models","description":"Models within this group: Claude Opus 5.5","buckets":[{"window":"5h","remaining_fraction":0.9,"reset_time":"2030-03-17T17:46:40Z"}]}]}}}'
+  exit 0
+fi
 pwd > "$log/cwd"
 cat > "$log/stdin"
 printf '%s\n%s\n' "${BRIGADE_DEPTH:-}" "${ANTHROPIC_BASE_URL:-}" > "$log/env"
@@ -189,7 +203,7 @@ fn read_only_codex_run_prints_the_reply_and_how_to_continue() {
     let work = sandbox.work();
     assert!(
         out.contains(&format!(
-            "brigade run sol --resume codex-thread --cwd {} --effort high\n",
+            "brigade run sol --account codex --resume codex-thread --cwd {} --effort high\n",
             work.display()
         )),
         "{out}"
@@ -222,7 +236,10 @@ fn user_roster_agents_get_their_env_expanded() {
     let sandbox = Sandbox::new();
     sandbox.user_roster(
         r#"
-        [[agent]]
+        [[account]]
+        name = "local"
+
+        [[account.agent]]
         name = "claude-local"
         harness = "claude"
         model = "local"
@@ -234,7 +251,7 @@ fn user_roster_agents_get_their_env_expanded() {
 
     let listed = stdout(&sandbox.brigade(&["list"]));
     assert!(
-        listed.contains("claude-local (claude, local, effort medium, from "),
+        listed.contains("claude-local:\n  local account: Claude Code on a local model (local, effort medium, from "),
         "{listed}"
     );
 
@@ -335,11 +352,11 @@ fn a_limited_run_switches_to_its_fallback() {
     let out = stdout(&output);
     assert!(out.starts_with("claude reply\n"), "{out}");
     assert!(
-        out.contains("[brigade] sol hit a usage limit in Codex, so opus ran instead: You’ve hit your usage limit."),
+        out.contains("[brigade] sol hit a usage limit on the codex account, so opus ran on the claude account instead: You’ve hit your usage limit."),
         "{out}"
     );
     assert!(
-        out.contains("continue it with: brigade run opus --resume claude-session"),
+        out.contains("continue it with: brigade run opus --account claude --resume claude-session"),
         "{out}"
     );
     let args = sandbox.args("claude");
@@ -365,7 +382,7 @@ fn a_limited_run_switches_to_its_fallback() {
     assert_eq!(both.status.code(), Some(4));
     let err = stderr(&both);
     assert!(
-        err.contains("sol hit a usage limit in Codex, so opus ran instead"),
+        err.contains("sol hit a usage limit on the codex account, so opus ran on the claude account instead"),
         "{err}"
     );
     assert!(
@@ -393,7 +410,11 @@ fn a_call_can_pick_or_refuse_the_fallback() {
         .unwrap();
     assert!(picked.status.success(), "{}", stderr(&picked));
     assert!(stdout(&picked).starts_with("agy reply\n"), "{}", stdout(&picked));
-    assert!(stdout(&picked).contains("so neon ran instead"), "{}", stdout(&picked));
+    assert!(
+        stdout(&picked).contains("so neon ran on the agy account instead"),
+        "{}",
+        stdout(&picked)
+    );
 
     let resumed = sandbox
         .command(&["run", "sol", "--resume", "codex-thread", "go"])
@@ -579,7 +600,7 @@ fn unknown_agents_and_unsupported_efforts_are_rejected() {
     let sandbox = Sandbox::new();
     let unknown = stderr(&sandbox.brigade(&["run", "gpt", "x"]));
     assert!(
-        unknown.contains("no agent `gpt` in the roster; try one of: opus, fable"),
+        unknown.contains("no agent `gpt` in the roster; try one of: fable, opus, sonnet"),
         "{unknown}"
     );
     let effort = stderr(&sandbox.brigade(&["run", "neon", "--effort", "ultra", "x"]));
@@ -847,17 +868,19 @@ fn work_committed_on_the_agents_own_branch_lands_on_the_runs_branch() {
 fn install_agents_gives_each_user_agent_a_subagent_in_every_harness() {
     let sandbox = Sandbox::new();
     let roster = r#"
-[[agent]]
+[[catalog]]
+name = "sol"
+description = "pinned to the previous Sol"
+models = { codex = "gpt-6.1-sol" }
+
+[[account]]
+name = "local"
+
+[[account.agent]]
 name = "claude-local"
 harness = "claude"
 model = "local"
 description = "Claude Code on the local model"
-
-[[agent]]
-name = "sol"
-harness = "codex"
-model = "gpt-6.1-sol"
-description = "pinned to the previous Sol"
 "#;
     sandbox.user_roster(roster);
     let home = sandbox.root();
@@ -940,9 +963,12 @@ description: {description}
 {instructions}
 """
 
-[[agent]]
+[[account]]
 name = "muse"
 harness = "muse"
+
+[[account.agent]]
+name = "muse"
 model = "muse-2"
 description = "Muse Code's own model"
 "#;
@@ -957,7 +983,7 @@ fn a_custom_harness_runs_agents_from_its_roster_declaration() {
     let out = stdout(&output);
     assert!(out.starts_with("muse reply\n\n[brigade] muse ran in muse"), "{out}");
     assert!(
-        out.contains("continue it with: brigade run muse --resume muse-session"),
+        out.contains("continue it with: brigade run muse --account muse --resume muse-session"),
         "{out}"
     );
     assert_eq!(
@@ -1051,7 +1077,7 @@ fn calls(sandbox: &Sandbox, cli: &str) -> usize {
 }
 
 #[test]
-fn a_limited_model_is_remembered_so_the_next_run_spends_no_call() {
+fn a_limited_account_is_remembered_so_the_next_run_spends_no_call() {
     let sandbox = Sandbox::new();
     let limited = sandbox
         .command(&["run", "sol", "go"])
@@ -1060,34 +1086,25 @@ fn a_limited_model_is_remembered_so_the_next_run_spends_no_call() {
         .unwrap();
     assert_eq!(limited.status.code(), Some(4));
     assert!(
-        stderr(&limited).contains("[brigade] gpt-6.2-sol on the codex account is limited until 2030-11-14 07:50"),
+        stderr(&limited).contains("[brigade] the codex account is limited until 2030-11-14 07:50"),
         "{}",
         stderr(&limited)
     );
 
-    let again = sandbox.brigade(&["run", "sol", "go"]);
+    // A ChatGPT plan's limit covers every model on it.
+    let again = sandbox.brigade(&["run", "astra", "go"]);
     assert_eq!(again.status.code(), Some(4));
     assert!(
-        stderr(&again).contains(
-            "[brigade] sol didn't run: gpt-6.2-sol on the codex account is still limited: You’ve hit your usage limit"
-        ),
+        stderr(&again)
+            .contains("[brigade] astra didn't run: the codex account is still limited: You’ve hit your usage limit"),
         "{}",
         stderr(&again)
     );
     assert_eq!(calls(&sandbox, "codex"), 1, "the second run never called codex");
 
-    let other_model = sandbox.brigade(&["run", "astra", "go"]);
-    assert!(
-        other_model.status.success(),
-        "astra's model isn't limited: {}",
-        stderr(&other_model)
-    );
-    assert_eq!(calls(&sandbox, "codex"), 2);
-
     let capacity = stdout(&sandbox.brigade(&["capacity"]));
-    assert!(capacity.contains("codex (sol, astra): free, 0 running"), "{capacity}");
     assert!(
-        capacity.contains("  sol (gpt-6.2-sol): limited until 2030-11-14 07:50"),
+        capacity.contains("codex (sol, astra): limited until 2030-11-14 07:50"),
         "{capacity}"
     );
     let json: serde_json::Value = serde_json::from_str(&stdout(&sandbox.brigade(&["capacity", "--json"]))).unwrap();
@@ -1097,27 +1114,57 @@ fn a_limited_model_is_remembered_so_the_next_run_spends_no_call() {
         .iter()
         .find(|a| a["account"] == "codex")
         .unwrap();
-    let sol = codex["agents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["name"] == "sol")
-        .unwrap();
-    assert_eq!(
-        (&sol["free"], &codex["agents"][1]["free"]),
-        (&false.into(), &true.into())
-    );
-    assert_eq!(sol["limit"]["until"].as_u64(), json_until(&sandbox));
+    assert_eq!(codex["free"], false);
+    assert_eq!(codex["limit"]["until"].as_u64(), json_until(&sandbox));
 
     let cleared = sandbox.brigade(&["capacity", "--clear", "codex"]);
     assert_eq!(stdout(&cleared), "forgot the limit on the codex account\n");
     assert!(sandbox.brigade(&["run", "sol", "go"]).status.success());
-    assert_eq!(calls(&sandbox, "codex"), 3);
+    assert_eq!(calls(&sandbox, "codex"), 2);
+
+    let traversal = sandbox.brigade(&["capacity", "--clear", "../../victim"]);
+    assert!(
+        stderr(&traversal).contains("there's no ../../victim account"),
+        "{}",
+        stderr(&traversal)
+    );
+    assert!(!sandbox.root().join("state/victim.json").exists());
+}
+
+#[test]
+fn an_agy_limit_is_on_its_model_alone() {
+    let sandbox = Sandbox::new();
+    let limited = sandbox
+        .command(&["run", "neon", "go"])
+        .env("FAKE_LIMIT", "agy")
+        .output()
+        .unwrap();
+    assert_eq!(limited.status.code(), Some(4));
+    assert!(
+        stderr(&limited).contains("lets one run try gemini-4-neon on the agy account again after"),
+        "{}",
+        stderr(&limited)
+    );
+    assert!(
+        sandbox.brigade(&["run", "hydrogen", "go"]).status.success(),
+        "hydrogen's model isn't limited"
+    );
+
+    let capacity = stdout(&sandbox.brigade(&["capacity"]));
+    assert!(capacity.contains("agy (neon, hydrogen): free, 0 running"), "{capacity}");
+    assert!(
+        capacity.contains("  neon (gemini-4-neon): limited, tries again after "),
+        "{capacity}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&stdout(&sandbox.brigade(&["capacity", "--json"]))).unwrap();
+    let agy = json.as_array().unwrap().iter().find(|a| a["account"] == "agy").unwrap();
+    let neon = &agy["agents"][0];
+    assert_eq!((&agy["free"], &neon["free"]), (&true.into(), &false.into()));
 }
 
 fn json_until(sandbox: &Sandbox) -> Option<u64> {
     let text = fs::read_to_string(sandbox.root().join("state/brigade/accounts/codex.json")).unwrap();
-    serde_json::from_str::<serde_json::Value>(&text).unwrap()["models"]["gpt-6.2-sol"]["until"].as_u64()
+    serde_json::from_str::<serde_json::Value>(&text).unwrap()["limit"]["until"].as_u64()
 }
 
 #[test]
@@ -1134,7 +1181,10 @@ fn a_known_limited_account_falls_back_at_once() {
     let second = sandbox.brigade(&["run", "sol", "go"]);
     assert!(second.status.success(), "{}", stderr(&second));
     assert!(stdout(&second).starts_with("claude reply\n"), "{}", stdout(&second));
-    assert!(stdout(&second).contains("sol hit a usage limit in Codex, so opus ran instead"));
+    assert!(
+        stdout(&second)
+            .contains("sol hit a usage limit on the codex account, so opus ran on the claude account instead")
+    );
     assert_eq!(calls(&sandbox, "codex"), 1, "the known limit skipped codex");
 }
 
@@ -1144,7 +1194,7 @@ fn claude_reports_usage_and_the_reset_in_its_stream() {
     assert!(sandbox.brigade(&["run", "opus", "go"]).status.success());
     let capacity = stdout(&sandbox.brigade(&["capacity"]));
     assert!(
-        capacity.contains("claude (opus, fable, sonnet): free, 0 running"),
+        capacity.contains("claude (fable, opus, sonnet): free, 0 running"),
         "{capacity}"
     );
     assert!(
@@ -1191,7 +1241,9 @@ fn wait_holds_a_run_until_its_accounts_limit_resets() {
 #[test]
 fn a_full_account_holds_runs_until_a_slot_frees() {
     let sandbox = Sandbox::new();
-    sandbox.user_roster("[[account]]\nname = \"codex\"\nmax_runs = 1\n");
+    sandbox.user_roster(
+        "[[account]]\nname = \"codex\"\nharness = \"codex\"\nagents = [\"sol\", \"astra\"]\nmax_runs = 1\n",
+    );
     let first = sandbox
         .command(&["run", "sol", "--detach", "go"])
         .env("FAKE_SLEEP", "3")
@@ -1225,4 +1277,116 @@ fn a_full_account_holds_runs_until_a_slot_frees() {
     let done = sandbox.brigade(&["wait", &second]);
     assert!(done.status.success(), "{}", stderr(&done));
     assert_eq!(calls(&sandbox, "codex"), 2);
+}
+
+#[test]
+fn an_agent_on_two_accounts_runs_on_whichever_has_capacity() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .user_roster("[[account]]\nname = \"agy\"\nharness = \"agy\"\nagents = [\"neon\", \"hydrogen\", \"opus\"]\n");
+
+    let first = sandbox
+        .command(&["run", "opus", "go"])
+        .env("FAKE_LIMIT", "claude")
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{}", stderr(&first));
+    let out = stdout(&first);
+    assert!(out.starts_with("agy reply\n"), "{out}");
+    assert!(
+        out.contains("[brigade] opus hit a usage limit on the claude account, so opus ran on the agy account instead"),
+        "{out}"
+    );
+    assert!(
+        out.contains("continue it with: brigade run opus --account agy --resume agy-conversation"),
+        "{out}"
+    );
+    let args = sandbox.args("agy");
+    assert!(
+        args.windows(2).any(|pair| pair == ["--model", "claude-opus-5-5"]),
+        "{args:?}"
+    );
+
+    let second = sandbox.brigade(&["run", "opus", "go"]);
+    assert!(stdout(&second).starts_with("agy reply\n"), "{}", stdout(&second));
+    assert_eq!(calls(&sandbox, "claude"), 1, "the known limit skipped the claude route");
+
+    let pinned = sandbox.brigade(&["run", "opus", "--account", "claude", "go"]);
+    assert_eq!(pinned.status.code(), Some(4), "a pinned route doesn't move");
+    let unknown = sandbox.brigade(&["run", "opus", "--account", "codex", "go"]);
+    assert!(
+        stderr(&unknown).contains("the codex account doesn't offer opus"),
+        "{}",
+        stderr(&unknown)
+    );
+}
+
+#[test]
+fn when_a_backoff_runs_out_one_run_tries_the_limit_and_the_rest_wait() {
+    let sandbox = Sandbox::new();
+    let limited = sandbox
+        .command(&["run", "neon", "go"])
+        .env("FAKE_LIMIT", "agy")
+        .output()
+        .unwrap();
+    assert_eq!(limited.status.code(), Some(4));
+    // Wind the backoff back so it has run out.
+    let state = sandbox.root().join("state/brigade/accounts/agy.json");
+    let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&state).unwrap()).unwrap();
+    value["models"]["gemini-4-neon"]["retry_at"] = (brigade::runs::now() - 1).into();
+    fs::write(&state, value.to_string()).unwrap();
+
+    let waiting: Vec<String> = (0..3)
+        .map(|_| {
+            let started = sandbox
+                .command(&["run", "neon", "--wait", "--detach", "go"])
+                .env("FAKE_LIMIT", "agy")
+                .output()
+                .unwrap();
+            run_id(&stdout(&started))
+        })
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        for id in &waiting {
+            let _ = sandbox.brigade(&["wait", id, "--timeout", "0"]);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert_eq!(calls(&sandbox, "agy"), 2, "one probe after the first limit, not three");
+    for id in &waiting {
+        let state = sandbox.brigade(&["wait", id, "--timeout", "0"]);
+        assert_eq!(state.status.code(), Some(3), "a run asked to wait keeps waiting");
+        sandbox.brigade(&["cancel", id]);
+    }
+    let backoff = serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&state).unwrap()).unwrap();
+    assert_eq!(
+        backoff["models"]["gemini-4-neon"]["backoff_secs"], 3600,
+        "the failed probe doubled it"
+    );
+}
+
+#[test]
+fn refresh_reads_quotas_and_a_used_up_one_holds_runs_back() {
+    let sandbox = Sandbox::new();
+    let refreshed = sandbox.brigade(&["capacity", "--refresh"]);
+    assert!(refreshed.status.success(), "{}", stderr(&refreshed));
+    let out = stdout(&refreshed);
+    assert!(out.contains("codex (sol, astra): limited until 2030-03-17"), "{out}");
+    assert!(out.contains("  codex, 5-hour: 100% used, resets 2030-03-17"), "{out}");
+    assert!(out.contains("  Current week (all models): 37% used, resets "), "{out}");
+    assert!(
+        out.contains("  neon (gemini-4-neon): limited until 2030-03-17"),
+        "{out}"
+    );
+
+    let codex_calls = calls(&sandbox, "codex");
+    let held = sandbox.brigade(&["run", "sol", "go"]);
+    assert_eq!(held.status.code(), Some(4));
+    assert!(
+        stderr(&held).contains("sol didn't run: the codex account is still limited: codex, 5-hour is used up"),
+        "{}",
+        stderr(&held)
+    );
+    assert_eq!(calls(&sandbox, "codex"), codex_calls, "the used-up quota spent no call");
 }

@@ -10,4 +10,5 @@ pub mod report;
 pub mod roster;
 pub mod runs;
 pub mod settings;
+pub mod usage;
 pub mod worktree;

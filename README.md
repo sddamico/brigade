@@ -2,15 +2,15 @@
 
 Tag in a named agent from Claude Code, Codex or Antigravity (agy) and have it run in its own CLI on its own model. Ask for "a sol subagent" from Claude Code and you get GPT-6.2 Sol running in Codex; ask for "a team of three neon subagents" from Codex and you get three Gemini 4 Neon runs in agy.
 
-The same roster works from all three harnesses:
+The same roster works from all three harnesses. By default each account offers these:
 
-| Agent | Runs in | Model |
+| Account | Agents | Models |
 |---|---|---|
-| `opus`, `fable`, `sonnet` | Claude Code | Claude Opus, Fable, Sonnet |
-| `sol`, `astra` | Codex | `gpt-6.2-sol`, `gpt-6.2-astra` |
-| `neon`, `hydrogen` | agy | `gemini-4-neon`, `gemini-4-hydrogen` |
+| `claude` (Claude Code) | `fable`, `opus`, `sonnet` | Claude Fable, Opus, Sonnet |
+| `codex` (Codex) | `sol`, `astra` | `gpt-6.2-sol`, `gpt-6.2-astra` |
+| `agy` (Antigravity) | `neon`, `hydrogen` | `gemini-4-neon`, `gemini-4-hydrogen` |
 
-You can add your own agents, or change these, in `~/.config/brigade/roster.toml`.
+The catalog has more (haiku, terra, carbon, argon, flash, and opus and sonnet through agy) for an account to opt into, and you can add accounts and agents of your own, in `~/.config/brigade/roster.toml`.
 
 ## How it works
 
@@ -36,9 +36,9 @@ Runs are read-only unless asked to write, and use the agent's model at the harne
 The CLI, with cargo or mise:
 
 ```sh
-cargo install --git https://github.com/sddamico/brigade --tag v0.6.0
+cargo install --git https://github.com/sddamico/brigade --tag v0.7.0
 # or, in ~/.config/mise/config.toml:
-# "cargo:https://github.com/sddamico/brigade" = "tag:v0.6.0"
+# "cargo:https://github.com/sddamico/brigade" = "tag:v0.7.0"
 ```
 
 The plugin, from this repo's marketplace:
@@ -50,13 +50,13 @@ claude plugin install brigade@brigade
 codex plugin marketplace add https://github.com/sddamico/brigade.git
 codex plugin add brigade@brigade
 
-agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.6.0
+agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.7.0
 ```
 
 Codex plugins can't ship subagent roles, so link the roles from Codex's copy of the plugin into `~/.codex/agents`, which Codex searches recursively. Re-point it after a plugin update:
 
 ```sh
-ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.6.0/codex/agents ~/.codex/agents/brigade
+ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.7.0/codex/agents ~/.codex/agents/brigade
 ```
 
 Each agent needs its harness's CLI installed and logged in.
@@ -87,59 +87,76 @@ Each reply ends with `[brigade]` lines naming the run, and for a session the com
 
 Every run belongs to whoever waits on it. `brigade wait` and a foreground `brigade run` renew the run's lease while they wait; a run nobody has waited on for 90 seconds is cancelled, along with everything its harness started. So stopping a forwarder subagent, or the session it was in, stops the agent it started. Ctrl-C on a foreground run and `brigade cancel <run id>` stop one at once.
 
-## Accounts and limits
+## Accounts and routes
 
-Every agent draws on an account, which is its harness unless the roster says otherwise: sol and astra share `codex`, opus, fable and sonnet share `claude`. brigade remembers when a model hits a usage limit and until when, so the next run on it doesn't spend a call. A limit covers that model alone, since usage can run out for one model and not another (agy credits that still cover a cheaper model), except where the harness says the window spans the account, as Claude Code's five-hour and seven-day windows do. The next run on a limited model:
-
-- with a fallback, it goes straight to the fallback
-- with `--wait`, it waits until the account frees up
-- otherwise it ends at once as limited, naming the reset time
-
-The reset time comes from Claude Code's `rate_limit_event`s (it streams them with every run, along with how much of the usage window is gone), from Codex's limit message, or, where the harness gives none (agy), from a backoff: 30 minutes, doubling each time the one run let through is limited again. A run that gets through clears its model's limit and any on the account.
+The roster is a catalog of agents, and the accounts that offer them. An account is a set of credentials runs draw on and share limits with: a Claude subscription, a ChatGPT plan, an agy login, a local model server. It names its harness, opts into catalog agents, and can define agents of its own. A user roster's accounts replace built-in ones of the same name and add the rest:
 
 ```toml
-[[agent]]
-name = "claude-local"
-harness = "claude"
-account = "local"          # shares its limits and slots with other agents on "local"
-# ...
+# agy's Claude allowance is separate from its Gemini one, so opus runs there
+# when the Claude subscription's opus is limited.
+[[account]]
+name = "agy"
+harness = "agy"
+agents = ["neon", "hydrogen", "opus"]
 
+# Only these from the Claude subscription.
+[[account]]
+name = "claude"
+harness = "claude"
+agents = ["fable", "opus"]
+
+# A second Claude login.
+[[account]]
+name = "claude-work"
+harness = "claude"
+agents = ["opus", "sonnet"]
+env = { CLAUDE_CONFIG_DIR = "$HOME/.claude-work" }
+
+# Claude Code and Codex on a local model server, which serves two runs at once.
 [[account]]
 name = "local"
-max_runs = 2               # runs beyond this wait for a slot
-```
+max_runs = 2
 
-```sh
-brigade capacity                 # every account: free, full or limited until when
-brigade capacity --json
-brigade capacity --clear agy     # forget a limit you know is over, like topped-up credits
-brigade runs --state waiting     # runs and their state: waiting, running, done, failed, limited, cancelled
-brigade run sol --wait "..."     # wait out sol's limit instead of ending as limited
-```
-
-## Your own agents
-
-The user roster uses the same format as [roster.toml](roster.toml). An entry with the name of a built-in agent replaces it. `env` and `args` go to the harness's CLI, and `$VAR` and `${VAR}` expand from brigade's environment. For example, Claude Code on a local model behind an Anthropic-compatible server:
-
-```toml
-[[agent]]
+[[account.agent]]
 name = "claude-local"
 harness = "claude"
 model = "$LOCAL_MODEL"
 effort = "medium"   # optional; without it the harness's default applies
 description = "Claude Code on the local model"
+best_for = "private work that mustn't leave the machine"
 args = ["--disallowedTools", "Artifact"]
-
-[agent.env]
-ANTHROPIC_BASE_URL = "$LOCAL_MODEL_SERVER"
-ANTHROPIC_DEFAULT_HAIKU_MODEL = "$LOCAL_MODEL"
-ANTHROPIC_SMALL_FAST_MODEL = "$LOCAL_MODEL"
-CLAUDE_CODE_MAX_CONTEXT_TOKENS = "196608"
+env = { ANTHROPIC_BASE_URL = "$LOCAL_MODEL_SERVER" }
 ```
+
+An agent more than one account offers has a route through each. `brigade run opus` takes the first route with capacity, in account order: built-in accounts first, a user account that replaces one keeping its place, then the user's others. A route that's limited or full is passed over without spending a call, and a run that hits a limit moves to the next route. `--account <account>` pins a route. `env` and `args` go to the harness's CLI, and `$VAR` and `${VAR}` expand from brigade's environment. Catalog entries of your own (`[[catalog]]`, as in [roster.toml](roster.toml)) add agents any account can opt into. `brigade list` shows every agent, what it's best for, and its routes.
+
+## Limits and quotas
+
+brigade remembers when a route hits a usage limit and until when, so the next run on it doesn't spend a call. A limit covers that model alone, since usage can run out for one model and not another (agy's Gemini models and its Claude models draw on separate allowances), except where it covers the account: Claude Code's five-hour and seven-day windows, and a ChatGPT plan's limit. A run whose routes are all limited:
+
+- with a fallback, goes straight to the fallback
+- with `--wait`, waits until a route frees up, and waits out a limit it hits while running, too
+- otherwise ends at once as limited, naming the reset time
+
+The reset time comes from Claude Code's `rate_limit_event`s (it streams them with every run, along with how much of the usage window is gone), from Codex's limit message, or, where the harness gives none, from a backoff: 30 minutes, doubling each time the one run let through to try it is limited again. A run that gets through clears its model's limit and any on the account.
+
+`brigade capacity --refresh` reads each account's quotas from its harness, without spending a run: Claude Code's `/usage`, agy's `/usage` and the Codex app server's rate limits. They count every session on the account, not just brigade's, so usage from your other sessions shows. A used-up quota holds back every model it covers until it resets. brigade reads them only when asked.
+
+```sh
+brigade capacity                 # every account and agent: free, full or limited until when
+brigade capacity --refresh       # read every account's quotas first (a few seconds)
+brigade capacity --json
+brigade capacity --clear agy     # forget a limit you know is over, like topped-up credits
+brigade runs --state waiting     # runs and their state: waiting, running, done, failed, limited, cancelled
+brigade run sol --wait "..."     # wait out sol's limit instead of ending as limited
+brigade run opus --account agy "..."
+```
+
+## Your own agents
 
 `brigade install-agents` gives each of your agents a subagent of its own in all three harnesses, so a host can pick it by name like a built-in one. It writes them to `~/.claude/agents`, `~/.codex/agents` and `~/.gemini/config/agents`, and only ever rewrites or removes files it wrote. Run it again after changing the roster or upgrading brigade. Until then, the generic `forward` subagent runs your agents.
 
-A `[fallbacks]` table names the agent a run switches to when its agent hits a usage limit. The fallback gets the same task and reports the switch. Pick one from another harness: an agent's siblings in the same CLI usually share its account's limit.
+A `[fallbacks]` table names the agent a run switches to when every route of its agent is limited. The fallback gets the same task and reports the switch.
 
 ```toml
 [fallbacks]
@@ -148,7 +165,7 @@ astra = "opus"
 opus = "sol"
 ```
 
-A run follows at most one fallback, so two agents can fall back to each other. `--fallback <agent>` picks one for a single run and `--no-fallback` turns it off.
+`--fallback <agent>` picks one for a single run and `--no-fallback` turns it off.
 
 ## Your own harnesses
 
@@ -186,9 +203,12 @@ description: {description}
 {instructions}
 """
 
-[[agent]]
+[[account]]
 name = "muse"
 harness = "muse"
+
+[[account.agent]]
+name = "muse"
 model = "muse-2"
 description = "Muse Code on its own model"
 ```

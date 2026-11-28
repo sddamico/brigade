@@ -388,6 +388,8 @@ mod tests {
             harness,
             model: model.into(),
             effort: None,
+            efforts: Vec::new(),
+            best_for: None,
             description: String::new(),
             env: BTreeMap::new(),
             args: Vec::new(),

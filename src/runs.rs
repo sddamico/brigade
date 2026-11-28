@@ -50,10 +50,14 @@ pub struct RunRecord {
     /// The depth the worker runs at, one more than whoever started it.
     pub depth: u32,
     pub started_at: u64,
-    /// The agent the task goes to instead if `agent` hits a usage limit.
+    /// Where the task goes when `agent` can't take it: the agent's other
+    /// routes, then its fallback's, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next: Vec<Agent>,
+    /// The effort the call asked for, which carries over to a route that takes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fallback: Option<Agent>,
-    /// Set once the run has switched to its fallback, which `agent` now is.
+    pub asked_effort: Option<Effort>,
+    /// Set once the run has switched to another route or agent, which `agent` now is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fell_back_from: Option<FellBack>,
     /// Wait for a limited account to free up instead of ending as limited.
@@ -65,23 +69,38 @@ pub struct RunRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FellBack {
     pub agent: String,
+    pub account: String,
     pub harness: Harness,
-    /// The harness's message about the limit, which says when it resets.
+    /// Why it couldn't take the run: the harness's message about the limit,
+    /// or that the account was full.
     pub error: String,
+    /// False when the account was full rather than limited.
+    pub limited: bool,
+}
+
+/// Why a run left a route behind.
+struct Skip {
+    error: String,
+    limited: bool,
 }
 
 impl RunRecord {
-    fn fall_back(mut self, fallback: Agent, error: &str) -> RunRecord {
+    /// Moves the run to `next[index]`, leaving the routes before it behind.
+    fn switch(mut self, index: usize, skip: Skip) -> RunRecord {
+        let rest = self.next.split_off(index + 1);
+        let to = self.next.pop().expect("switching to a route the run has");
+        self.next = rest;
         self.fell_back_from = Some(FellBack {
             agent: self.agent.name.clone(),
-            harness: self.agent.harness,
-            error: error.to_string(),
+            account: self.agent.account.name.clone(),
+            harness: self.agent.harness.clone(),
+            error: skip.error,
+            limited: skip.limited,
         });
-        // The call's model and effort were chosen for the first agent's harness.
-        self.model = fallback.model.clone();
-        self.effort = fallback.effort;
-        self.agent = fallback;
-        self.fallback = None;
+        // A model chosen on the call belongs to the first route's harness.
+        self.model = to.model.clone();
+        self.effort = self.asked_effort.filter(|e| to.supports(*e)).or(to.effort);
+        self.agent = to;
         self
     }
 }
@@ -339,7 +358,15 @@ pub fn execute(
         Err(error) => Outcome::Failed { error: error.clone() },
         Ok(task) => loop {
             let outcome = match take_slot(settings, &record, dir, lease) {
-                Slot::Taken => run_harness(settings, &record, dir, task, lease, var),
+                Slot::Taken(0, _) => run_harness(settings, &record, dir, task, lease, var),
+                Slot::Taken(index, skip) => {
+                    record = record.switch(index - 1, skip.expect("a route left behind says why"));
+                    // Written before it starts, so a waiter reports the route that runs.
+                    if let Err(error) = dir.write_record(&record) {
+                        break Outcome::Failed { error };
+                    }
+                    run_harness(settings, &record, dir, task, lease, var)
+                }
                 Slot::Limited(limit, model) => Outcome::Limited {
                     error: limit.message,
                     ran: false,
@@ -349,12 +376,21 @@ pub fn execute(
                 },
                 Slot::Ended(outcome) => outcome,
             };
-            match (&outcome, record.fallback.clone()) {
-                (Outcome::Limited { error, .. }, Some(fallback)) => {
-                    record = record.fall_back(fallback, error);
-                    // Written before the fallback starts, so a waiter reports the agent that runs.
-                    // The run gives up its slot and waits for one on the fallback's account.
+            match &outcome {
+                Outcome::Limited { error, ran: true, .. } if !record.next.is_empty() => {
+                    let skip = Skip {
+                        error: error.clone(),
+                        limited: true,
+                    };
+                    record = record.switch(0, skip);
+                    // The run gives up its slot and waits for one on the next route's account.
                     if let Err(error) = dir.write_record(&record).and_then(|_| dir.mark_waiting()) {
+                        break Outcome::Failed { error };
+                    }
+                }
+                // A run asked to wait outlasts a limit it hits, too.
+                Outcome::Limited { ran: true, .. } if record.wait => {
+                    if let Err(error) = dir.mark_waiting() {
                         break Outcome::Failed { error };
                     }
                 }
@@ -388,15 +424,17 @@ pub fn execute(
 }
 
 enum Slot {
-    Taken,
-    /// The account, or the model alone when it names one, is limited and the
-    /// run won't wait for it.
+    /// A slot on the route at this index of the run's routes, the current one
+    /// first, and why the current one was left behind if it was.
+    Taken(usize, Option<Skip>),
+    /// Every route is limited and the run won't wait: the first route's limit,
+    /// and its model when the limit is on the model alone.
     Limited(Limit, Option<String>),
     Ended(Outcome),
 }
 
-/// Waits until the run's account can take it, unless the account is limited
-/// and the run has a fallback to go to or wasn't asked to wait.
+/// Takes a slot on the first route that has capacity. Waits while a route is
+/// only full, or when the run asked to wait out its limits.
 fn take_slot(settings: &Settings, record: &RunRecord, dir: &RunDir, lease: Duration) -> Slot {
     let mut next_look = Instant::now();
     loop {
@@ -404,14 +442,43 @@ fn take_slot(settings: &Settings, record: &RunRecord, dir: &RunDir, lease: Durat
             return Slot::Ended(Outcome::Cancelled { reason });
         }
         if Instant::now() >= next_look {
-            match claim(settings, record, dir) {
-                Ok(Claim::Taken) => return Slot::Taken,
-                Ok(Claim::Limited(limit, model)) if !record.wait || record.fallback.is_some() => {
-                    return Slot::Limited(limit, model);
+            let routes = std::iter::once((&record.agent, record.model.as_str()))
+                .chain(record.next.iter().map(|agent| (agent, agent.model.as_str())));
+            let (mut skip, mut first_limit, mut any_full) = (None, None, false);
+            for (index, (agent, model)) in routes.enumerate() {
+                match claim(settings, agent, model, &record.id, dir) {
+                    Ok(Claim::Taken) => return Slot::Taken(index, skip),
+                    Ok(Claim::Limited(limit, scope)) => {
+                        if index == 0 {
+                            skip = Some(Skip {
+                                error: limit.message.clone(),
+                                limited: true,
+                            });
+                        }
+                        first_limit.get_or_insert((limit, scope));
+                    }
+                    Ok(Claim::Full) => {
+                        if index == 0 {
+                            skip = Some(Skip {
+                                error: format!(
+                                    "the {} account was running as many runs as it takes",
+                                    agent.account.name
+                                ),
+                                limited: false,
+                            });
+                        }
+                        any_full = true;
+                    }
+                    Err(error) => return Slot::Ended(Outcome::Failed { error }),
                 }
-                Ok(_) => next_look = Instant::now() + SLOT_POLL,
-                Err(error) => return Slot::Ended(Outcome::Failed { error }),
             }
+            if !any_full
+                && !record.wait
+                && let Some((limit, scope)) = first_limit
+            {
+                return Slot::Limited(limit, scope);
+            }
+            next_look = Instant::now() + SLOT_POLL;
         }
         std::thread::sleep(POLL);
     }
@@ -424,14 +491,18 @@ enum Claim {
 }
 
 /// Takes one of the account's slots under its lock, so two runs can't both
-/// take the last one.
-fn claim(settings: &Settings, record: &RunRecord, dir: &RunDir) -> Result<Claim, String> {
-    let account = &record.agent.account;
+/// take the last one. A limit whose backoff has run out lets one run through
+/// to try it, and holds the rest until that run says how it went.
+fn claim(settings: &Settings, agent: &Agent, model: &str, run: &str, dir: &RunDir) -> Result<Claim, String> {
+    let account = &agent.account;
     let _lock = accounts::lock(settings, &account.name)?;
-    let state = accounts::load(settings, &account.name);
-    if let Some(limit) = state.limit_on(&record.model, now()) {
-        let model = (state.limit.as_ref() != Some(limit)).then(|| record.model.clone());
-        return Ok(Claim::Limited(limit.clone(), model));
+    let now = now();
+    let alive = |probe: &str| {
+        RunDir::open(settings, probe).is_ok_and(|(_, dir)| matches!(dir.state(), State::Running | State::Waiting))
+    };
+    match accounts::check(settings, &account.name, model, run, now, &alive)? {
+        accounts::Check::Limited(limit, scope) => return Ok(Claim::Limited(limit, scope)),
+        accounts::Check::Clear => {}
     }
     if let Some(max) = account.max_runs {
         let running = list(settings)
@@ -626,16 +697,25 @@ fn note_account(settings: &Settings, record: &RunRecord, outcome: Outcome, usage
     // Claude Code names the window it hit. Its five-hour and seven-day windows
     // cover the whole account; anything else, and every other harness's limit,
     // is taken to be the model's own.
-    let account_wide = rejected
+    let claude_window = rejected
         .and_then(|u| u.window.as_deref())
         .is_some_and(|w| ACCOUNT_WINDOWS.contains(&w));
+    // A ChatGPT plan's usage limit covers every model on it, unless Codex says
+    // which model it's for.
+    let codex_plan = record.agent.harness == Harness::Codex
+        && matches!(&outcome, Outcome::Limited { error, .. } if !error.contains("usage limit for"));
+    let account_wide = claude_window || codex_plan;
     let model = (!account_wide).then_some(record.model.as_str());
     if let Some(usage) = usage {
         let _ = accounts::record_usage(settings, account, Usage { at: now, ..usage });
     }
     match outcome {
         Outcome::Limited { error, ran, .. } => {
-            let until = rejected_until.or_else(|| accounts::reset_in_message(&error));
+            // A reset already past, as from a clock or time zone that differs
+            // from the harness's, is no reset time at all.
+            let until = rejected_until
+                .or_else(|| accounts::reset_in_message(&error))
+                .filter(|until| *until > now);
             let _ = accounts::record_limit(settings, account, model, &error, until, now);
             let state = accounts::load(settings, account);
             let limit = state.limit_on(&record.model, now);
@@ -643,7 +723,7 @@ fn note_account(settings: &Settings, record: &RunRecord, outcome: Outcome, usage
                 error,
                 ran,
                 until,
-                retry_at: limit.filter(|l| l.until.is_none()).map(|l| l.retry_at),
+                retry_at: limit.filter(|(l, _)| l.until.is_none()).map(|(l, _)| l.retry_at),
                 model: model.map(String::from),
             }
         }

@@ -1,57 +1,107 @@
-# The built-in roster. A user roster at ~/.config/brigade/roster.toml (or
-# $XDG_CONFIG_HOME/brigade/roster.toml) adds agents, or replaces these by name.
+# The built-in roster: a catalog of the agents brigade knows, and the accounts
+# that offer them by default. A user roster at ~/.config/brigade/roster.toml (or
+# $XDG_CONFIG_HOME/brigade/roster.toml) is laid over it: its [[catalog]]
+# entries and [[account]]s replace these by name and add the rest.
 #
-# harness:  the CLI the agent runs in: claude, codex or agy
-# model:    passed to that CLI's --model (agy takes the family; effort picks the tier)
-# effort:   optional; without it, and without --effort on the call, the harness's
-#           own default effort applies
-# env/args: extra environment and CLI arguments; values expand $VAR and ${VAR}
-# account:  optional; the credentials the agent's runs share limits with, the
-#           harness's name by default. [[account]] tables can cap max_runs
+# [[catalog]]   an agent: its model id in each harness that has it, the efforts
+#               it takes there where fewer than the harness's, and what it's
+#               best for
+# [[account]]   credentials runs draw on and share usage limits with: the
+#               harness its catalog agents run in, which catalog agents it
+#               offers, agents of its own ([[account.agent]]), max_runs, and
+#               env/args for every run on it ($VAR and ${VAR} expand)
+#
+# An agent more than one account offers has a route through each, and a run
+# takes the first route with capacity, in account order.
 #
 # A user roster can also declare harnesses of its own in [[harness]] tables
 # (see the README), and have a [fallbacks] table, `sol = "opus"`, naming the
-# agent a run switches to when its agent hits a usage limit. The built-in roster
-# has none, since which accounts a user has is theirs to say.
+# agent a run switches to when every route of its agent is limited.
 
-[[agent]]
-name = "opus"
-harness = "claude"
-model = "opus"
-description = "Claude Opus in Claude Code"
-
-[[agent]]
+[[catalog]]
 name = "fable"
-harness = "claude"
-model = "fable"
-description = "Claude Fable in Claude Code"
+description = "Claude Fable"
+best_for = "the hardest, longest work"
+models = { claude = "fable" }
 
-[[agent]]
+[[catalog]]
+name = "opus"
+description = "Claude Opus"
+best_for = "deep reasoning, architecture and hard debugging"
+models = { claude = "opus", agy = "claude-opus-5-5" }
+efforts = { agy = ["low", "medium", "high"] }
+
+[[catalog]]
 name = "sonnet"
-harness = "claude"
-model = "sonnet"
-description = "Claude Sonnet in Claude Code"
+description = "Claude Sonnet"
+best_for = "fast, capable everyday coding and review"
+models = { claude = "sonnet", agy = "claude-sonnet-5-5" }
+efforts = { agy = ["low", "medium", "high"] }
 
-[[agent]]
+[[catalog]]
+name = "haiku"
+description = "Claude Haiku"
+best_for = "quick, cheap small tasks"
+models = { claude = "haiku" }
+
+[[catalog]]
 name = "sol"
-harness = "codex"
-model = "gpt-6.2-sol"
-description = "GPT-6.2 Sol in Codex, OpenAI's go-to model for coding and everyday work"
+description = "GPT-6.2 Sol"
+best_for = "coding and everyday work"
+models = { codex = "gpt-6.2-sol" }
 
-[[agent]]
+[[catalog]]
 name = "astra"
-harness = "codex"
-model = "gpt-6.2-astra"
-description = "GPT-6.2 Astra in Codex, OpenAI's most capable model for complex coding"
+description = "GPT-6.2 Astra"
+best_for = "complex coding"
+models = { codex = "gpt-6.2-astra" }
 
-[[agent]]
+[[catalog]]
+name = "terra"
+description = "GPT-6.1 Terra"
+best_for = "everyday coding at a lower cost than Sol"
+models = { codex = "gpt-6.1-terra" }
+
+[[catalog]]
 name = "neon"
-harness = "agy"
-model = "gemini-4-neon"
-description = "Gemini 4 Neon in Antigravity"
+description = "Gemini 4 Neon"
+models = { agy = "gemini-4-neon" }
 
-[[agent]]
+[[catalog]]
 name = "hydrogen"
+description = "Gemini 4 Hydrogen"
+models = { agy = "gemini-4-hydrogen" }
+
+[[catalog]]
+name = "carbon"
+description = "Gemini 4 Carbon"
+models = { agy = "gemini-4-carbon" }
+efforts = { agy = ["low", "medium", "high"] }
+
+[[catalog]]
+name = "argon"
+description = "Gemini 4 Argon"
+models = { agy = "gemini-4-argon" }
+efforts = { agy = ["low", "medium", "high"] }
+
+[[catalog]]
+name = "flash"
+description = "Gemini 3.8 Flash"
+best_for = "quick, cheap tasks"
+models = { agy = "gemini-3.8-flash" }
+efforts = { agy = ["low", "medium", "high"] }
+
+[[account]]
+name = "claude"
+harness = "claude"
+agents = ["fable", "opus", "sonnet"]
+
+[[account]]
+name = "codex"
+harness = "codex"
+agents = ["sol", "astra"]
+
+[[account]]
+name = "agy"
 harness = "agy"
-model = "gemini-4-hydrogen"
-description = "Gemini 4 Hydrogen in Antigravity"
+agents = ["neon", "hydrogen"]

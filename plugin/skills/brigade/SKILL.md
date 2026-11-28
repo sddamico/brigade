@@ -10,11 +10,11 @@ A brigade agent is a named worker that runs in one harness's CLI on one model. Y
 <!-- roster: generated from roster.toml -->
 | Agent | Runs in | Model | Effort | What it is |
 |---|---|---|---|---|
-| `opus` | Claude Code | `opus` | harness default | Claude Opus in Claude Code |
 | `fable` | Claude Code | `fable` | harness default | Claude Fable in Claude Code |
+| `opus` | Claude Code | `opus` | harness default | Claude Opus in Claude Code |
 | `sonnet` | Claude Code | `sonnet` | harness default | Claude Sonnet in Claude Code |
-| `sol` | Codex | `gpt-6.2-sol` | harness default | GPT-6.2 Sol in Codex, OpenAI's go-to model for coding and everyday work |
-| `astra` | Codex | `gpt-6.2-astra` | harness default | GPT-6.2 Astra in Codex, OpenAI's most capable model for complex coding |
+| `sol` | Codex | `gpt-6.2-sol` | harness default | GPT-6.2 Sol in Codex |
+| `astra` | Codex | `gpt-6.2-astra` | harness default | GPT-6.2 Astra in Codex |
 | `neon` | Antigravity | `gemini-4-neon` | harness default | Gemini 4 Neon in Antigravity |
 | `hydrogen` | Antigravity | `gemini-4-hydrogen` | harness default | Gemini 4 Hydrogen in Antigravity |
 <!-- /roster -->
@@ -85,7 +85,9 @@ Pass the error on as brigade gave it.
 
 A run that ends with `[brigade] <agent> hit a usage limit in <harness>` (exit code 4 from the shell) ran out of usage. brigade remembers the limit: the next run on that model, or on the whole account when the limit covers it, ends at once with `<agent> didn't run: ... is still limited`, without spending a call, until the reset time on the `... is limited until ...` line. Don't retry it, and don't swap in a different agent either. Tell the user which agent hit its limit and when it resets, and let them choose what to do. On a team, report what the other members finished.
 
-`brigade capacity` shows every account: free, full (at its `max_runs`), or limited and until when, plus how much of Claude's usage window is gone. `--wait` on a run holds it until its account frees up instead of ending as limited; a run on a full account always waits for a slot. `brigade runs` lists runs and their state.
+An agent more than one account offers (opus on both the Claude subscription and agy, say) has a route through each, and brigade runs it on the first with capacity: a route that's limited or full is passed over without spending a call, and the reply says which account ran it (`<agent> hit a usage limit on the <account> account, so <agent> ran on the <other> account instead`). "Use the agy account" in the request pins a route (`--account agy`).
+
+`brigade capacity` shows every account and agent: free, full (at its `max_runs`), or limited and until when, plus how much of Claude's usage window is gone; `brigade capacity --refresh` first reads every account's quotas from its harness, free, counting usage from every session on the account. `--wait` on a run holds it until a route frees up instead of ending as limited; a run whose routes are only full always waits for a slot. `brigade runs` lists runs and their state.
 
 The user can choose a fallback ahead of time: for every run of an agent in the `[fallbacks]` table of their roster (`brigade list` shows them), or for one request ("fall back to opus if sol hits its limit"), which goes into the forwarder's prompt in those words, or `--fallback <agent>` from the shell. "Don't fall back" turns it off for a request. A limited run then hands the same task to the fallback, and its `[brigade]` lines start with `<agent> hit a usage limit in <harness>, so <fallback> ran instead`. Tell the user about the switch. Its `continue it with` line names the fallback, so follow-ups go to the fallback. A resumed session never falls back, since only its own harness can continue it.
 

@@ -61,6 +61,9 @@ enum Command {
         /// Forget the limit on this account, e.g. once agy credits are topped up
         #[arg(long, value_name = "ACCOUNT")]
         clear: Option<String>,
+        /// Read every account's quotas from its harness first. Free, but takes a few seconds
+        #[arg(long, conflicts_with = "clear")]
+        refresh: bool,
         #[arg(long)]
         json: bool,
     },
@@ -102,6 +105,9 @@ struct RunArgs {
     /// Continue the session a previous run printed
     #[arg(long, value_name = "SESSION")]
     resume: Option<String>,
+    /// Run on this account's route alone, when more than one account offers the agent
+    #[arg(long, value_name = "ACCOUNT")]
+    account: Option<String>,
     /// Agent to hand the task to if this one hits its harness's usage limit, in place of the roster's fallback
     #[arg(long, value_name = "AGENT", conflicts_with_all = ["resume", "no_fallback"])]
     fallback: Option<String>,
@@ -142,7 +148,10 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
                     serde_json::to_string_pretty(roster.entries()).expect("entries serialize")
                 );
             } else {
-                print!("{}", report::roster(roster.entries(), &settings.roster_file));
+                print!(
+                    "{}",
+                    report::roster(&roster.agents(), roster.entries(), &settings.roster_file)
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -158,8 +167,14 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
             let _ = print_state(&settings, &dir, &state, json, 0)?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Capacity { clear, json } => {
+        Command::Capacity { clear, refresh, json } => {
             if let Some(account) = clear {
+                let roster = Roster::load(&settings.roster_file).map_err(|e| e.to_string())?;
+                let known = roster.accounts().iter().any(|a| a.name == account)
+                    || accounts::known(&settings).contains(&account);
+                if !known {
+                    return Err(format!("there's no {account} account"));
+                }
                 let had = accounts::clear(&settings, &account)?;
                 println!(
                     "{}",
@@ -172,6 +187,11 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
                 return Ok(ExitCode::SUCCESS);
             }
             let roster = Roster::load(&settings.roster_file).map_err(|e| e.to_string())?;
+            if refresh {
+                for (account, error) in capacity::refresh(&settings, &roster, runs::now()) {
+                    eprintln!("brigade: couldn't read the {account} account's usage: {error}");
+                }
+            }
             let accounts = capacity::capacity(&settings, &roster, runs::now(), &env_var);
             if json {
                 println!(
@@ -243,27 +263,42 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         ));
     }
     let roster = Roster::load(&settings.roster_file).map_err(|e| e.to_string())?;
-    let entry = roster.get(&args.agent).ok_or_else(|| {
+    let routes = roster.routes(&args.agent);
+    let first = routes.first().ok_or_else(|| {
         format!(
             "no agent `{}` in the roster; try one of: {}",
             args.agent,
             roster.names().join(", ")
         )
     })?;
-    let mut agent = entry.agent.clone();
-    // Expanded here so a missing variable is reported before anything starts,
-    // and the run's record names the model the harness really gets.
-    agent.model = expand(&agent.model, &env_var)
-        .map_err(|UnsetVar(name)| format!("`{}` needs ${name}, which isn't set", agent.name))?;
-    let effort = args.effort.or(agent.effort);
-    if effort.is_some_and(|e| !agent.harness.supports(e)) {
-        return Err(format!(
-            "{} runs in {}, which takes {}",
-            agent.name,
-            agent.harness,
-            agent.harness.effort_levels()
-        ));
+    let fallback_name = first.fallback.clone();
+    let mut routes: Vec<Agent> = routes.iter().map(|e| e.agent.clone()).collect();
+    if let Some(account) = &args.account {
+        routes.retain(|agent| &agent.account.name == account);
+        if routes.is_empty() {
+            return Err(format!("the {account} account doesn't offer {}", args.agent));
+        }
     }
+    // A chosen model, or a session to continue, belongs to one route's harness.
+    if args.model.is_some() || args.resume.is_some() {
+        routes.truncate(1);
+    }
+    if let Some(effort) = args.effort {
+        let takers: Vec<Agent> = routes.iter().filter(|a| a.supports(effort)).cloned().collect();
+        if takers.is_empty() {
+            let agent = &routes[0];
+            return Err(format!(
+                "{} runs in {}, which takes {}",
+                agent.name,
+                agent.harness,
+                agent.effort_levels()
+            ));
+        }
+        routes = takers;
+    }
+    let mut routes = routes.into_iter().map(expanded).collect::<Result<Vec<_>, _>>()?;
+    let agent = routes.remove(0);
+    let effort = args.effort.or(agent.effort);
     if args.resume.is_some() && !agent.harness.can_resume() {
         return Err(format!(
             "{} runs in {}, which can't continue a session: its harness has no resume_args",
@@ -272,11 +307,25 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     }
     // A resumed session lives in its own harness, where no other agent can pick it up.
     let fallback = match (&args.fallback, args.no_fallback || args.resume.is_some()) {
-        (Some(name), _) => Some(name.as_str()),
-        (None, false) => entry.fallback.as_deref(),
+        (Some(name), _) => Some(name.clone()),
+        (None, false) => fallback_name,
         (None, true) => None,
     };
-    let fallback = fallback.map(|name| fallback_agent(&roster, &agent, name)).transpose()?;
+    if let Some(name) = &fallback {
+        if name == &agent.name {
+            return Err(format!("{name} can't fall back to itself"));
+        }
+        let fallback_routes = roster.routes(name);
+        if fallback_routes.is_empty() {
+            return Err(format!(
+                "no agent `{name}` to fall back to; try one of: {}",
+                roster.names().join(", ")
+            ));
+        }
+        for entry in fallback_routes {
+            routes.push(expanded(entry.agent.clone())?);
+        }
+    }
     let task = read_task(&args.task)?;
     let cwd = args
         .cwd
@@ -310,7 +359,8 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
         resume: args.resume,
         depth: settings.depth + 1,
         started_at: runs::now(),
-        fallback,
+        next: routes,
+        asked_effort: args.effort,
         fell_back_from: None,
         wait: args.wait,
     };
@@ -343,30 +393,20 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     })
 }
 
-fn fallback_agent(roster: &Roster, agent: &Agent, name: &str) -> Result<Agent, String> {
-    if name == agent.name {
-        return Err(format!("{name} can't fall back to itself"));
-    }
-    let mut fallback = roster
-        .get(name)
-        .ok_or_else(|| {
-            format!(
-                "no agent `{name}` to fall back to; try one of: {}",
-                roster.names().join(", ")
-            )
-        })?
-        .agent
-        .clone();
-    fallback.model =
-        expand(&fallback.model, &env_var).map_err(|UnsetVar(var)| format!("`{name}` needs ${var}, which isn't set"))?;
-    Ok(fallback)
+/// The route with its model's variables expanded, so a missing variable is
+/// reported before anything starts and the record names the model the harness
+/// really gets.
+fn expanded(mut agent: Agent) -> Result<Agent, String> {
+    agent.model = expand(&agent.model, &env_var)
+        .map_err(|UnsetVar(name)| format!("`{}` needs ${name}, which isn't set", agent.name))?;
+    Ok(agent)
 }
 
 /// What a waiting run waits for, as `brigade wait` explains it.
 fn waiting_for(settings: &Settings, record: &RunRecord) -> String {
     let account = &record.agent.account;
     match accounts::load(settings, &account.name).limit_on(&record.model, runs::now()) {
-        Some(limit) => match limit.until {
+        Some((limit, _)) => match limit.until {
             Some(until) => format!("which is limited until {}", accounts::local_time(until)),
             None => format!(
                 "which is limited, and brigade tries it again after {}",

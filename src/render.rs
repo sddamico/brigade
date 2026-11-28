@@ -56,7 +56,7 @@ fn forwarded<'a>(host: &Harness, agents: &[&'a Agent]) -> Vec<&'a Agent> {
 }
 
 pub fn plugin_files(roster: &Roster, version: &str, skill_template: &str) -> Result<Vec<(PathBuf, String)>, String> {
-    let agents: Vec<&Agent> = roster.entries().iter().map(|e| &e.agent).collect();
+    let agents: Vec<&Agent> = roster.agents().iter().map(|e| &e.agent).collect();
     let mut files = vec![
         (PathBuf::from(".claude-plugin/marketplace.json"), marketplace(version)),
         (
@@ -106,10 +106,10 @@ pub struct Installed {
 /// - in a custom harness that can host, one for each agent from another
 ///   harness, plus `forward`, as the plugin gives the built-in hosts
 pub fn installed_forwarders(roster: &Roster) -> Vec<Installed> {
-    let agents: Vec<&Agent> = roster.entries().iter().map(|e| &e.agent).collect();
+    let agents: Vec<&Agent> = roster.agents().iter().map(|e| &e.agent).collect();
     let built_in = Roster::built_in();
     let mut files = Vec::new();
-    for entry in roster.entries() {
+    for entry in roster.agents() {
         let agent = &entry.agent;
         if entry.source != Source::User || built_in.get(&agent.name).is_some() {
             continue;
@@ -264,8 +264,13 @@ fn asks_for(name: &str) -> String {
 }
 
 fn forwarder_description(agent: &Agent, host: &Harness) -> String {
+    let best_for = agent
+        .best_for
+        .as_deref()
+        .map(|b| format!(" (best for {b})"))
+        .unwrap_or_default();
     format!(
-        "{}, run in its own CLI through brigade. {} Write the prompt as the agent's own task; its reply comes \
+        "{}{best_for}, run in its own CLI through brigade. {} Write the prompt as the agent's own task; its reply comes \
          back with the [brigade] lines without asking. Say in the prompt if the task should change files, \
          which model or effort to use, which session to continue, or which agent to fall back to on a usage limit.{}",
         agent.description,
@@ -340,7 +345,7 @@ fn forward_description(host: &Harness, agents: &[&Agent]) -> String {
 fn forwarder_body(agent: Option<&Agent>, host: &Harness, agents: &[&Agent], shell_tool: &str) -> String {
     let (intro, name, levels) = match agent {
         Some(agent) => {
-            let levels: Vec<&str> = agent.harness.efforts().iter().map(|e| e.as_str()).collect();
+            let levels: Vec<&str> = agent.efforts().iter().map(|e| e.as_str()).collect();
             (
                 format!(
                     "You hand one task to the brigade agent `{}`, which runs in {}, and pass back its reply.",
@@ -396,13 +401,17 @@ relaying (\"via brigade\", \"ask {name} to\", \"return the [brigade] lines\"), w
 run anything: reply that {name} doesn't take that effort and which ones it does
    - `--worktree`, together with `--write`, when the request asks for its own worktree or a git worktree, in \
 any wording (\"use your own worktree\", \"work in a worktree of the repo\"). Never add it otherwise
-   - `--resume <session> --cwd <dir>` when it continues an earlier run; both come from that run's \
-`[brigade] continue it with:` line
+   - `--account <account> --resume <session> --cwd <dir>` when it continues an earlier run; all three come \
+from that run's `[brigade] continue it with:` line
    - `--fallback <agent>` when it names an agent to switch to if {name} hits a usage limit (\"fall back to \
 opus\"), or `--no-fallback` when it says not to switch
+   - `--wait` when it asks to wait out a usage limit (\"wait for its limit to reset\") rather than end
+   - `--account <account>` when it names the account to run on (\"use the agy account\"); otherwise brigade \
+picks the first account offering {name} that has capacity
 
 2. That prints a run id. Wait for it with `brigade wait <run id> --timeout {WAIT_SLICE_SECS}`. While it reports \
-that the run is still running, call it again.
+that the run is still running or waiting, call it again. Don't sleep, retry or start another run yourself: a \
+limited or failed run is the answer to pass back.
 
 3. Your whole reply is the final `brigade wait` output, copied character for character: every line, \
 including all the `[brigade]` lines at the end. Nothing before it, nothing after it, no summary, no code \
@@ -410,8 +419,8 @@ fence, no reformatting. The `[brigade]` lines tell the caller how to continue th
 changes are. If brigade fails, reply with its error output the same way.
 
 4. You may get follow-up messages after your reply. Each one is a new task for {name} in the same session: \
-run it through steps 1 to 3, adding the `--resume <session> --cwd <dir>` (and any `--write`, `--model` or \
-`--effort`) from your previous run's `[brigade] continue it with:` line. When that line names another agent \
+run it through steps 1 to 3, adding the `--account <account> --resume <session> --cwd <dir>` (and any \
+`--write`, `--model` or `--effort`) from your previous run's `[brigade] continue it with:` line. When that line names another agent \
 than {name}, because the run fell back to it, run that agent. Never answer a follow-up from what you \
 remember.
 "

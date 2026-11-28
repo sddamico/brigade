@@ -39,8 +39,9 @@ pub fn done(record: &RunRecord, session: Option<&str>, message: &str, worktree: 
             choices.push_str(" --write");
         }
         out.push_str(&format!(
-            "[brigade] continue it with: brigade run {} --resume {session} --cwd {}{choices}\n",
+            "[brigade] continue it with: brigade run {} --account {} --resume {session} --cwd {}{choices}\n",
             agent.name,
+            agent.account.name,
             record.cwd.display(),
         ));
     }
@@ -112,14 +113,16 @@ pub fn limited(record: &RunRecord, outcome: &Outcome, logs: &Path, worktree: Opt
 /// Says which agent a run started on when a usage limit made it switch, and
 /// when that agent's limit resets.
 fn fell_back(record: &RunRecord) -> String {
+    let to = format!(
+        "{} ran on the {} account instead",
+        record.agent.name, record.agent.account.name
+    );
     match &record.fell_back_from {
-        Some(from) => format!(
-            "[brigade] {} hit a usage limit in {}, so {} ran instead: {}\n",
-            from.agent,
-            from.harness.product(),
-            record.agent.name,
-            from.error
+        Some(from) if from.limited => format!(
+            "[brigade] {} hit a usage limit on the {} account, so {to}: {}\n",
+            from.agent, from.account, from.error
         ),
+        Some(from) => format!("[brigade] {}, so {to}\n", from.error),
         None => String::new(),
     }
 }
@@ -273,26 +276,36 @@ pub fn state_json(record: &RunRecord, state: &State, logs: &Path, worktree: Opti
     serde_json::to_string_pretty(&value).expect("json values serialize") + "\n"
 }
 
-pub fn roster(entries: &[Entry], user_file: &Path) -> String {
+/// One line per agent, then one per route: the account, harness and model it
+/// runs on there.
+pub fn roster(agents: &[&Entry], routes: &[Entry], user_file: &Path) -> String {
     let mut out = String::new();
-    for entry in entries {
+    for entry in agents {
         let agent = &entry.agent;
-        let source = match entry.source {
-            Source::BuiltIn => String::new(),
-            Source::User => format!(", from {}", user_file.display()),
-        };
+        let best_for = agent
+            .best_for
+            .as_deref()
+            .map(|b| format!(" Best for {b}."))
+            .unwrap_or_default();
         let fallback = match &entry.fallback {
-            Some(fallback) => format!("; falls back to {fallback} on a usage limit"),
+            Some(fallback) => format!(" Falls back to {fallback} on a usage limit."),
             None => String::new(),
         };
-        out.push_str(&format!(
-            "{} ({}, {}, {}{source}): {}{fallback}\n",
-            agent.name,
-            agent.harness,
-            agent.model,
-            effort_label(agent.effort),
-            agent.description,
-        ));
+        out.push_str(&format!("{}:{best_for}{fallback}\n", agent.name));
+        for route in routes.iter().filter(|r| r.agent.name == agent.name) {
+            let source = match route.source {
+                Source::BuiltIn => String::new(),
+                Source::User => format!(", from {}", user_file.display()),
+            };
+            let agent = &route.agent;
+            out.push_str(&format!(
+                "  {} account: {} ({}, {}{source})\n",
+                agent.account.name,
+                agent.description,
+                agent.model,
+                effort_label(agent.effort),
+            ));
+        }
     }
     out
 }
@@ -343,6 +356,20 @@ pub fn capacity(accounts: &[AccountCapacity], now: u64) -> String {
             let age = now.saturating_sub(usage.at) / 60;
             out.push_str(&format!("  {window} window {used}{resets} (as of {age} min ago)\n"));
         }
+        if let Some(read_at) = account.quotas_read_at {
+            let age = now.saturating_sub(read_at) / 60;
+            for quota in &account.quotas {
+                let resets = quota
+                    .resets_at
+                    .map(|r| format!(", resets {}", local_time(r)))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "  {}: {:.0}% used{resets} (read {age} min ago)\n",
+                    quota.name,
+                    quota.used * 100.0
+                ));
+            }
+        }
     }
     out
 }
@@ -350,7 +377,7 @@ pub fn capacity(accounts: &[AccountCapacity], now: u64) -> String {
 fn limited_until(limit: &Limit) -> String {
     match limit.until {
         Some(until) => format!("limited until {}", local_time(until)),
-        None => format!("limited, tried again after {}", local_time(limit.retry_at)),
+        None => format!("limited, tries again after {}", local_time(limit.retry_at)),
     }
 }
 

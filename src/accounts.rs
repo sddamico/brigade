@@ -27,15 +27,82 @@ pub struct AccountState {
     pub models: BTreeMap<String, Limit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// The quotas the harness last reported, when brigade was asked to read them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quotas: Vec<Quota>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quotas_read_at: Option<u64>,
+}
+
+/// A usage window a set of models on an account share, as the harness reports
+/// it: Claude Code's weekly windows, agy's model groups, Codex's five-hour and
+/// weekly limits.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Quota {
+    pub name: String,
+    /// The share of the window used, from 0 to 1.
+    pub used: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<u64>,
+    /// The models it covers, by the harness's names for them; every model on
+    /// the account when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+}
+
+impl Quota {
+    pub fn covers(&self, model: &str) -> bool {
+        let model = comparable(model);
+        self.models.as_ref().is_none_or(|models| {
+            models.iter().any(|m| {
+                let m = comparable(m);
+                model == m || model.contains(&m)
+            })
+        })
+    }
+
+    fn used_up(&self) -> bool {
+        self.used >= 1.0
+    }
+}
+
+/// Harnesses spell one model differently in different places: agy's "Claude
+/// Opus 5.5" is its `claude-opus-5-5`, and its "Gemini 3.8 Flash" is
+/// `gemini-3.8-flash`.
+fn comparable(name: &str) -> String {
+    name.to_lowercase().replace(['.', ' ', '_'], "-")
 }
 
 impl AccountState {
-    /// The limit that keeps a run on `model` from starting now, if any.
-    pub fn limit_on(&self, model: &str, now: u64) -> Option<&Limit> {
-        [self.limit.as_ref(), self.models.get(model)]
-            .into_iter()
-            .flatten()
-            .find(|limit| now < limit.free_at())
+    /// The limit that keeps a run on `model` from starting now, if any, and its
+    /// model when it's on the model alone.
+    pub fn limit_on(&self, model: &str, now: u64) -> Option<(Limit, Option<String>)> {
+        if let Some(limit) = self.limit.as_ref().filter(|l| now < l.free_at()) {
+            return Some((limit.clone(), None));
+        }
+        if let Some(limit) = self.models.get(model).filter(|l| now < l.free_at()) {
+            return Some((limit.clone(), Some(model.to_string())));
+        }
+        self.quota_limit(model, now)
+    }
+
+    /// A used-up quota covering `model`, as a limit until it resets.
+    fn quota_limit(&self, model: &str, now: u64) -> Option<(Limit, Option<String>)> {
+        let read_at = self.quotas_read_at?;
+        let quota = self
+            .quotas
+            .iter()
+            .find(|q| q.used_up() && q.covers(model) && q.resets_at.unwrap_or(read_at + FIRST_BACKOFF_SECS) > now)?;
+        let free_at = quota.resets_at.unwrap_or(read_at + FIRST_BACKOFF_SECS);
+        let limit = Limit {
+            since: read_at,
+            until: quota.resets_at,
+            retry_at: free_at,
+            backoff_secs: 0,
+            message: format!("{} is used up", quota.name),
+            probe: None,
+        };
+        Some((limit, quota.models.is_some().then(|| model.to_string())))
     }
 }
 
@@ -50,6 +117,9 @@ pub struct Limit {
     pub backoff_secs: u64,
     /// The harness's own message about the limit.
     pub message: String,
+    /// The one run let through to try the limit once its backoff ran out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<String>,
 }
 
 impl Limit {
@@ -161,6 +231,7 @@ pub fn record_limit(
         retry_at: until.unwrap_or(retry_at),
         backoff_secs,
         message: message.to_string(),
+        probe: None,
     };
     save(settings, account, &state)
 }
@@ -173,7 +244,54 @@ fn placeholder(now: u64) -> Limit {
         retry_at: 0,
         backoff_secs: 0,
         message: String::new(),
+        probe: None,
     }
+}
+
+pub enum Check {
+    Clear,
+    /// The limit holding the run back, and its model when it's on the model alone.
+    Limited(Limit, Option<String>),
+}
+
+/// Whether a run on `model` may start now, for a caller holding the account's
+/// lock. Once a backoff runs out, the first run to ask becomes the probe and
+/// the rest stay held until it records how it went, unless `alive` says the
+/// probe run has ended without doing so.
+pub fn check(
+    settings: &Settings,
+    account: &str,
+    model: &str,
+    run: &str,
+    now: u64,
+    alive: &dyn Fn(&str) -> bool,
+) -> Result<Check, String> {
+    let mut state = load(settings, account);
+    let mut changed = false;
+    let mut held = None;
+    for scope in [None, Some(model)] {
+        let limit = match scope {
+            None => state.limit.as_mut(),
+            Some(model) => state.models.get_mut(model),
+        };
+        let Some(limit) = limit else { continue };
+        let probing = limit.until.is_none() && limit.probe.as_deref().is_some_and(|probe| probe != run && alive(probe));
+        if now < limit.free_at() || probing {
+            held = Some((limit.clone(), scope.map(String::from)));
+            break;
+        }
+        if limit.until.is_none() && limit.probe.as_deref() != Some(run) {
+            limit.probe = Some(run.to_string());
+            changed = true;
+        }
+    }
+    if changed {
+        save(settings, account, &state)?;
+    }
+    Ok(match held.or_else(|| state.quota_limit(model, now)) {
+        Some((limit, scope)) => Check::Limited(limit, scope),
+        None => Check::Clear,
+    })
 }
 
 /// Records that a run on `model` got through, so neither it nor the account is
@@ -188,6 +306,14 @@ pub fn record_success(settings: &Settings, account: &str, model: &str) -> Result
     Ok(())
 }
 
+pub fn record_quotas(settings: &Settings, account: &str, quotas: Vec<Quota>, now: u64) -> Result<(), String> {
+    let _lock = lock(settings, account)?;
+    let mut state = load(settings, account);
+    state.quotas = quotas;
+    state.quotas_read_at = Some(now);
+    save(settings, account, &state)
+}
+
 pub fn record_usage(settings: &Settings, account: &str, usage: Usage) -> Result<(), String> {
     let _lock = lock(settings, account)?;
     let mut state = load(settings, account);
@@ -196,6 +322,8 @@ pub fn record_usage(settings: &Settings, account: &str, usage: Usage) -> Result<
 }
 
 /// Forgets a limit the user knows is over, such as agy credits topped up.
+/// `account` is a name brigade knows, checked by the caller, since it names a
+/// file.
 pub fn clear(settings: &Settings, account: &str) -> Result<bool, String> {
     let _lock = lock(settings, account)?;
     let mut state = load(settings, account);
@@ -239,6 +367,84 @@ pub fn reset_in_message(message: &str) -> Option<u64> {
         _ => return None,
     };
     local_epoch(year, month as i32, day, hour, minute)
+}
+
+/// When a Claude Code `/usage` window resets: "Dec 2, 2am (America/New_York)",
+/// or just "3:30pm (...)" for later today. The zone is the machine's own, which
+/// is the one Claude Code reports in.
+pub fn claude_reset(when: &str, now: u64) -> Option<u64> {
+    let when = when.split(" (").next()?.trim();
+    let (date, clock) = match when.rsplit_once(", ") {
+        Some((date, clock)) => (Some(date), clock),
+        None => (None, when),
+    };
+    let clock = clock.to_lowercase();
+    let (time, meridiem) = clock.split_at(clock.len().checked_sub(2)?);
+    let (hour, minute) = match time.split_once(':') {
+        Some((h, m)) => (h.parse::<i32>().ok()?, m.parse::<i32>().ok()?),
+        None => (time.parse::<i32>().ok()?, 0),
+    };
+    let hour = match meridiem {
+        "am" => hour % 12,
+        "pm" => hour % 12 + 12,
+        _ => return None,
+    };
+    let today = local_date(now);
+    let (month, day) = match date {
+        Some(date) => {
+            let (month, day) = date.split_once(' ')?;
+            (month_index(month)?, day.parse().ok()?)
+        }
+        None => (today.1, today.2),
+    };
+    let at = local_epoch(today.0, month, day, hour, minute)?;
+    match (at < now, date) {
+        (false, _) => Some(at),
+        // A time with no date that's already past is tomorrow's.
+        (true, None) => Some(at + 24 * 60 * 60),
+        // A date that's already past is next year's.
+        (true, Some(_)) => local_epoch(today.0 + 1, month, day, hour, minute),
+    }
+}
+
+fn month_index(name: &str) -> Option<i32> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    MONTHS.iter().position(|m| name.starts_with(m)).map(|i| i as i32)
+}
+
+/// The local (year, 0-based month, day) of an epoch time.
+fn local_date(epoch: u64) -> (i32, i32, i32) {
+    let secs = epoch as libc::time_t;
+    // SAFETY: localtime_r writes only into the tm given.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&secs, &mut tm);
+        tm
+    };
+    (tm.tm_year + 1900, tm.tm_mon, tm.tm_mday)
+}
+
+/// An RFC 3339 UTC time, "2026-12-03T12:42:51Z", as agy reports resets.
+pub fn utc_epoch(text: &str) -> Option<u64> {
+    let (date, time) = text.trim_end_matches('Z').split_once('T')?;
+    let mut date = date.split('-').map(|p| p.parse::<i32>());
+    let mut time = time.split(['.', ':']).map(|p| p.parse::<i32>());
+    // SAFETY: an all-zero tm is valid, and timegm only reads and normalizes it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = date.next()?.ok()? - 1900;
+    tm.tm_mon = date.next()?.ok()? - 1;
+    tm.tm_mday = date.next()?.ok()?;
+    tm.tm_hour = time.next()?.ok()?;
+    tm.tm_min = time.next()?.ok()?;
+    tm.tm_sec = time.next()?.ok()?;
+    u64::try_from(unsafe { libc::timegm(&mut tm) }).ok()
+}
+
+#[cfg(test)]
+pub fn local_epoch_for_tests(year: i32, month: i32, day: i32, hour: i32, minute: i32) -> u64 {
+    local_epoch(year, month, day, hour, minute).unwrap()
 }
 
 fn local_epoch(year: i32, month: i32, day: i32, hour: i32, minute: i32) -> Option<u64> {
@@ -315,7 +521,10 @@ mod tests {
         );
 
         let state = load(&settings, "agy");
-        assert_eq!(state.limit_on("hydrogen", retried), Some(&second));
+        assert_eq!(
+            state.limit_on("hydrogen", retried),
+            Some((second.clone(), Some("hydrogen".into())))
+        );
         assert_eq!(state.limit_on("neon", retried), None, "other models aren't limited");
 
         record_success(&settings, "agy", "hydrogen").unwrap();
@@ -328,10 +537,58 @@ mod tests {
         let settings = settings(dir.path());
         record_limit(&settings, "codex", None, "try again later", Some(9_000), 1_000).unwrap();
         let state = load(&settings, "codex");
-        assert_eq!(state.limit_on("any-model", 1_000).map(Limit::free_at), Some(9_000));
+        assert_eq!(
+            state.limit_on("any-model", 1_000).map(|(l, _)| l.free_at()),
+            Some(9_000)
+        );
         assert_eq!(state.limit_on("any-model", 9_000), None, "free once the reset passes");
         assert_eq!(known(&settings), ["codex"]);
         assert!(clear(&settings, "codex").unwrap());
         assert_eq!(load(&settings, "codex").limit, None);
+    }
+
+    #[test]
+    fn a_used_up_quota_limits_the_models_it_covers_until_it_resets() {
+        let state = AccountState {
+            quotas: vec![
+                Quota {
+                    name: "Gemini Models, weekly".into(),
+                    used: 1.0,
+                    resets_at: Some(5_000),
+                    models: Some(vec!["gemini-4-neon".into(), "gemini-3.8-flash".into()]),
+                },
+                Quota {
+                    name: "Claude and GPT models, 5h".into(),
+                    used: 0.07,
+                    resets_at: Some(4_000),
+                    models: Some(vec!["claude-opus-5.5".into()]),
+                },
+            ],
+            quotas_read_at: Some(1_000),
+            ..AccountState::default()
+        };
+        let (limit, scope) = state.limit_on("gemini-3.8-flash", 2_000).unwrap();
+        assert_eq!((limit.until, scope.as_deref()), (Some(5_000), Some("gemini-3.8-flash")));
+        assert_eq!(limit.message, "Gemini Models, weekly is used up");
+        assert_eq!(state.limit_on("claude-opus-5-5", 2_000), None, "its group has room");
+        assert_eq!(state.limit_on("gemini-4-neon", 5_000), None, "free once it resets");
+    }
+
+    #[test]
+    fn reads_claudes_reset_times() {
+        let now = local_epoch(2026, 10, 27, 22, 0).unwrap();
+        assert_eq!(
+            local_time(claude_reset("Dec 2, 2am (America/New_York)", now).unwrap())[..16],
+            *"2026-12-02 02:00"
+        );
+        assert_eq!(
+            local_time(claude_reset("3:30pm (America/New_York)", now).unwrap())[..16],
+            *"2026-11-28 15:30"
+        );
+        assert_eq!(
+            local_time(claude_reset("Jan 4, 9am (America/New_York)", now).unwrap())[..16],
+            *"2027-01-04 09:00"
+        );
+        assert_eq!(utc_epoch("2026-12-03T12:42:51Z"), Some(1_796_301_771));
     }
 }
