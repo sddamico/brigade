@@ -63,6 +63,26 @@ impl Tree {
         saved
     }
 
+    /// SIGKILLs process group `group`, the harness's own, unless its pid now
+    /// belongs to a process other than the saved one (a pid isn't reused while
+    /// its group has members). Returns how many processes the group had.
+    pub fn kill_saved_group(saved: &[(i32, String)], group: i32) -> usize {
+        let table = process_table();
+        let reused = table
+            .iter()
+            .find(|row| row.pid == group)
+            .is_some_and(|row| !saved.iter().any(|(pid, start)| *pid == group && *start == row.start));
+        let members = table.iter().filter(|row| row.pgid == group).count();
+        if reused || members == 0 {
+            return 0;
+        }
+        // SAFETY: killpg only sends a signal, to a group just checked to be the harness's.
+        unsafe {
+            libc::killpg(group, libc::SIGKILL);
+        }
+        members
+    }
+
     /// SIGKILLs the processes in a saved tree that are still the same
     /// processes, and returns how many it found.
     pub fn kill_saved(saved: &[(i32, String)]) -> usize {

@@ -30,8 +30,10 @@ const CLAUDE_FORWARDER_MODEL: &str = "sonnet";
 // gpt-6-luna reworded about one relay in four.
 const CODEX_FORWARDER_MODEL: &str = "gpt-6.1-terra";
 const CODEX_FORWARDER_EFFORT: &str = "low";
-// flash_lite answered trivial tasks itself instead of running brigade.
-const AGY_FORWARDER_TIER: &str = "flash";
+// The session's own model: agy's tiers all draw on its Gemini allowance, which
+// runs out apart from its Claude one, and a forwarder that can't start leaves a
+// Claude-hosted session with no brigade at all.
+const AGY_FORWARDER_TIER: &str = "inherit";
 
 /// Directories whose every file is generated, so the generator deletes what it
 /// no longer writes.
@@ -385,8 +387,9 @@ fn forwarder_body(agent: Option<&Agent>, host: &Harness, agents: &[&Agent], shel
     };
     let sandbox = match host {
         Harness::Agy => {
-            "\n\n   Set `BypassSandbox` to true on this call and on every brigade call after it. brigade starts \
-another agent's CLI, which needs the network and its own config, out of reach of agy's terminal sandbox."
+            "\n\n   If run_command offers a `BypassSandbox` parameter, set it to true on this call and on every \
+brigade call after it. brigade starts another agent's CLI, which needs the network and its own config, out of \
+reach of agy's terminal sandbox. Without a sandbox there's no such parameter; leave it out."
                 .to_string()
         }
         Harness::Codex => format!(

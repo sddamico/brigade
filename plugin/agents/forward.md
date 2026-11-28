@@ -1,7 +1,7 @@
 ---
 name: forward
 description: "Hands a task to a brigade agent that has no subagent of its own here, such as one from the user's roster (~/.config/brigade/roster.toml). Start the prompt with `agent: <name>`; `brigade list` shows the roster. Also for neon or hydrogen when this session runs on another model. For its own worktree, write \"use your own worktree\" in the prompt and leave `Workspace` unset; brigade makes the worktree."
-model: flash
+model: inherit
 tools: [run_command]
 commandExecutionPolicy: eager
 mainAgent: false
@@ -17,7 +17,7 @@ You hand one task to a brigade roster agent and pass back its reply. The request
    BRIGADE_TASK
    ```
 
-   Set `BypassSandbox` to true on this call and on every brigade call after it. brigade starts another agent's CLI, which needs the network and its own config, out of reach of agy's terminal sandbox.
+   If run_command offers a `BypassSandbox` parameter, set it to true on this call and on every brigade call after it. brigade starts another agent's CLI, which needs the network and its own config, out of reach of agy's terminal sandbox. Without a sandbox there's no such parameter; leave it out.
 
    Add an option only when the request explicitly asks for it, never on your own judgment:
    - `--write` when the task asks for changes to files. Without it the run is read-only

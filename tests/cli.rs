@@ -1723,7 +1723,10 @@ fn prune_deletes_finished_runs_and_run_dirs_are_private() {
 
 #[test]
 fn a_sigterm_or_a_closed_terminal_cancels_a_foreground_run() {
-    for signal in [libc::SIGTERM, libc::SIGHUP] {
+    for (signal, reason) in [
+        (libc::SIGTERM, "brigade was told to stop (SIGTERM)"),
+        (libc::SIGHUP, "its terminal closed (SIGHUP)"),
+    ] {
         let sandbox = Sandbox::new();
         let child = sandbox
             .command(&["run", "opus", "job"])
@@ -1738,10 +1741,11 @@ fn a_sigterm_or_a_closed_terminal_cancels_a_foreground_run() {
         }
         let output = child.wait_with_output().unwrap();
         assert!(
-            stderr(&output).contains("was cancelled: interrupted"),
+            stderr(&output).contains(&format!("was cancelled: {reason}")),
             "{}",
             stderr(&output)
         );
+        assert_eq!(output.status.code(), Some(128 + signal));
         assert!(!is_alive(harness), "the harness outlived signal {signal}");
     }
 }
@@ -1887,4 +1891,62 @@ fn an_agy_transport_error_naming_resource_exhausted_is_a_limit() {
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
     let output = sandbox.brigade(&["run", "neon", "job"]);
     assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+}
+
+fn group_is_gone(group: i32) -> bool {
+    unsafe { libc::killpg(group, 0) == -1 }
+}
+
+/// A detached run whose worker is killed once its harness is going.
+fn lose_worker(sandbox: &Sandbox) -> (String, i32) {
+    let started = sandbox
+        .command(&["run", "astra", "--detach", "job"])
+        .env("FAKE_SLEEP", "30")
+        .output()
+        .unwrap();
+    let id = run_id(&stdout(&started));
+    let harness = sandbox.harness_pid("codex");
+    let dir = sandbox.root().join("state/brigade/runs").join(&id);
+    let worker: i32 = fs::read_to_string(dir.join("pid")).unwrap().trim().parse().unwrap();
+    unsafe {
+        libc::kill(worker, libc::SIGKILL);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!group_is_gone(harness), "the harness's sleep should outlive its worker");
+    (id, harness)
+}
+
+#[test]
+fn reaping_a_lost_run_stops_its_harnesss_whole_process_group() {
+    let sandbox = Sandbox::new();
+    let (id, harness) = lose_worker(&sandbox);
+    sandbox.brigade(&["wait", &id]);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        group_is_gone(harness),
+        "a process in the harness's group outlived the reaping"
+    );
+}
+
+#[test]
+fn pruning_reaps_a_lost_run_nobody_waits_on() {
+    let sandbox = Sandbox::new();
+    let (_, harness) = lose_worker(&sandbox);
+    assert_eq!(
+        stdout(&sandbox.brigade(&["runs", "--prune"])),
+        "deleted 1 finished run(s)\n"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(group_is_gone(harness));
+}
+
+#[test]
+fn cancel_json_on_a_finished_run_says_it_had_finished() {
+    let sandbox = Sandbox::new();
+    let done = sandbox.brigade(&["run", "opus", "--json", "job"]);
+    let value: serde_json::Value = serde_json::from_slice(&done.stdout).unwrap();
+    let cancelled = sandbox.brigade(&["cancel", value["run"]["id"].as_str().unwrap(), "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&cancelled.stdout).unwrap();
+    assert_eq!(value["already_finished"], true);
+    assert_eq!(value["status"], "done");
 }

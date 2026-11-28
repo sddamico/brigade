@@ -22,7 +22,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const POLL: Duration = Duration::from_millis(500);
@@ -34,11 +34,17 @@ pub const KEEP_RUNS: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Linux's limit on one command-line argument. agy takes the whole task as one.
 const MAX_ARG_BYTES: usize = 128 * 1024;
 
-/// Set by SIGTERM or SIGHUP to the worker, which then stops its run like a cancel.
-static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// The SIGTERM or SIGHUP sent to the worker, which then stops its run like a
+/// cancel, or 0.
+static STOP_REQUESTED: AtomicI32 = AtomicI32::new(0);
 
-extern "C" fn on_stop(_: libc::c_int) {
-    STOP_REQUESTED.store(true, Ordering::SeqCst);
+extern "C" fn on_stop(signal: libc::c_int) {
+    STOP_REQUESTED.store(signal, Ordering::SeqCst);
+}
+
+/// A line in worker.log, which is the worker's stderr.
+fn note(line: &str) {
+    eprintln!("{} {line}", accounts::local_timestamp(now()));
 }
 /// How often a waiting run looks for a slot on its account. Each look takes the
 /// account's lock and reads every run, so it's slower than the lease checks.
@@ -285,8 +291,17 @@ impl RunDir {
     /// How long since a waiter renewed the lease. One renewed "in the future",
     /// after the clock stepped back, counts as just renewed.
     fn lease_age(&self) -> Duration {
-        match fs::metadata(self.file("lease")).and_then(|m| m.modified()) {
-            Ok(renewed) => renewed.elapsed().unwrap_or(Duration::ZERO),
+        let path = self.file("lease");
+        match fs::metadata(&path).and_then(|m| m.modified()) {
+            Ok(renewed) => renewed.elapsed().unwrap_or_else(|_| {
+                // Set back to now, so an abandoned run doesn't also live out
+                // the clock's step.
+                let _ = fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .and_then(|f| f.set_modified(SystemTime::now()));
+                Duration::ZERO
+            }),
             Err(_) => Duration::MAX,
         }
     }
@@ -356,7 +371,11 @@ impl RunDir {
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        let stopped = Tree::kill_saved(&saved);
+        let mut stopped = Tree::kill_saved(&saved);
+        // Its process group catches what started in it after the last save.
+        if let Some(harness) = self.pid("harness.pid") {
+            stopped += Tree::kill_saved_group(&saved, harness);
+        }
         if let Ok(record) = self.record()
             && let Some(worktree) = record.worktree.as_ref().filter(|_| record.access == Access::Write)
         {
@@ -617,8 +636,10 @@ fn claim(settings: &Settings, agent: &Agent, model: &str, run: &str, dir: &RunDi
 }
 
 fn stop_reason(dir: &RunDir, lease: Duration) -> Option<String> {
-    if STOP_REQUESTED.load(Ordering::SeqCst) {
-        return Some("brigade's worker was told to stop".to_string());
+    match STOP_REQUESTED.load(Ordering::SeqCst) {
+        0 => {}
+        libc::SIGHUP => return Some("brigade's worker got SIGHUP".to_string()),
+        _ => return Some("brigade's worker got SIGTERM".to_string()),
     }
     dir.cancel_reason()
         .or_else(|| (dir.lease_age() > lease).then(|| format!("nobody waited on it for {}s", lease.as_secs())))
@@ -757,7 +778,7 @@ fn run_harness_once(
         }
     };
     let _ = dir.write_pid("harness.pid", child.id());
-    eprintln!("started `{}` as pid {}", invocation.program, child.id());
+    note(&format!("started `{}` as pid {}", invocation.program, child.id()));
     if let Some(mut stdin) = child.stdin.take() {
         let prompt = invocation.stdin.clone();
         // A harness that exits early closes the pipe; its exit status tells the story.
@@ -786,13 +807,13 @@ fn run_harness_once(
             }
         }
         if let Some(reason) = stop_reason(dir, lease) {
-            eprintln!("stopping it: {reason}");
+            note(&format!("stopping it: {reason}"));
             stop(&mut child);
             return Outcome::Cancelled { reason };
         }
         std::thread::sleep(POLL);
     };
-    eprintln!("it exited with {status}");
+    note(&format!("it exited with {status}"));
 
     let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
     let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
@@ -939,6 +960,11 @@ fn subject(task: &str) -> String {
 /// A run's worktree goes with it if it's still clean at its starting commit:
 /// it was only kept so the run's session could be continued there.
 pub fn prune(settings: &Settings, keep: Duration) -> usize {
+    // A run whose worker and waiter both died has nobody left to stop what it
+    // started, so its first chance is here.
+    for run in list(settings).iter().filter(|run| matches!(run.state, State::Lost)) {
+        let _ = run.dir.reap_lost();
+    }
     let cutoff = now().saturating_sub(keep.as_secs());
     list(settings)
         .into_iter()
@@ -963,12 +989,19 @@ fn stop(child: &mut Child) {
     let mut tree = Tree::of(pid);
     tree.signal(libc::SIGTERM);
     let deadline = Instant::now() + TERM_GRACE;
+    let mut exited = false;
     while Instant::now() < deadline {
         if let Ok(Some(_)) = child.try_wait() {
+            exited = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    note(if exited {
+        "it stopped on SIGTERM"
+    } else {
+        "it was still running after SIGTERM, so it got SIGKILL"
+    });
     // Whatever the harness started while it was shutting down.
     tree.merge(Tree::of(pid));
     tree.signal(libc::SIGKILL);

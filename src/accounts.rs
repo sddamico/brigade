@@ -487,6 +487,19 @@ fn local_epoch(year: i32, month: i32, day: i32, hour: i32, minute: i32) -> Optio
 }
 
 /// A time as the user's clock shows it: "2026-11-27 00:09 EST".
+/// "2026-11-28 00:43:07", for log lines.
+pub fn local_timestamp(epoch: u64) -> String {
+    let secs = epoch as libc::time_t;
+    // SAFETY: localtime_r and strftime write only into the buffers given.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&secs, &mut tm);
+        let mut buf = [0u8; 64];
+        let len = libc::strftime(buf.as_mut_ptr().cast(), buf.len(), c"%Y-%m-%d %H:%M:%S".as_ptr(), &tm);
+        String::from_utf8_lossy(&buf[..len]).into_owned()
+    }
+}
+
 pub fn local_time(epoch: u64) -> String {
     let secs = epoch as libc::time_t;
     // SAFETY: localtime_r and strftime write only into the buffers given.

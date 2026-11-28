@@ -15,15 +15,16 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 const STILL_RUNNING: u8 = 3;
 const LIMITED: u8 = 4;
-const INTERRUPTED_EXIT: u8 = 130;
+
 const ORPHAN_CHECK_EVERY: Duration = Duration::from_secs(2);
 
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+/// The signal that told a foreground run to stop, or 0.
+static INTERRUPTED: AtomicI32 = AtomicI32::new(0);
 
 /// Tag in named agents (sol, neon, opus...) that run in their own CLI.
 #[derive(Parser)]
@@ -195,11 +196,26 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         }
         Command::Cancel { run, json } => {
             let (_, dir) = RunDir::open(&settings, &run)?;
-            if let State::Finished(_) = dir.state() {
+            let state = dir.state();
+            if let State::Finished(_) = state {
                 if !json {
                     eprintln!("[brigade] run {run} had already finished, so there was nothing to cancel");
+                    return print_state(&settings, &dir, &state, json, 0);
                 }
-                return print_state(&settings, &dir, &dir.state(), json, 0);
+                let record = dir.record()?;
+                let mut value: serde_json::Value = serde_json::from_str(&report::state_json(
+                    &record,
+                    &state,
+                    dir.path(),
+                    dir.worktree_report().as_ref(),
+                ))
+                .expect("state json parses");
+                value["already_finished"] = true.into();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).expect("json values serialize")
+                );
+                return Ok(exit_code(&state));
             }
             let state = dir.cancel("cancelled with brigade cancel")?;
             let _ = print_state(&settings, &dir, &state, json, 0)?;
@@ -453,16 +469,16 @@ fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     std::thread::spawn(move || worker.wait());
     let orphaned = orphan_check();
     let started = Instant::now();
-    let stopping = || INTERRUPTED.load(Ordering::SeqCst);
-    let state = match dir.wait(None, &|| stopping() || orphaned()) {
-        State::Running | State::Waiting if stopping() => dir.cancel("interrupted")?,
+    let signal = || INTERRUPTED.load(Ordering::SeqCst);
+    let state = match dir.wait(None, &|| signal() != 0 || orphaned()) {
+        State::Running | State::Waiting if signal() != 0 => dir.cancel(&interrupted_by(signal()))?,
         state => state,
     };
     let code = print_state(settings, &dir, &state, args.json, started.elapsed().as_secs())?;
-    Ok(if INTERRUPTED.load(Ordering::SeqCst) {
-        ExitCode::from(INTERRUPTED_EXIT)
-    } else {
-        code
+    // A shell's own convention: 128 plus the signal's number.
+    Ok(match signal() {
+        0 => code,
+        signal => ExitCode::from(128 + signal as u8),
     })
 }
 
@@ -519,8 +535,17 @@ fn orphan_check() -> impl Fn() -> bool {
     }
 }
 
-extern "C" fn on_interrupt(_: libc::c_int) {
-    INTERRUPTED.store(true, Ordering::SeqCst);
+extern "C" fn on_interrupt(signal: libc::c_int) {
+    INTERRUPTED.store(signal, Ordering::SeqCst);
+}
+
+fn interrupted_by(signal: i32) -> String {
+    match signal {
+        libc::SIGINT => "interrupted".to_string(),
+        libc::SIGHUP => "its terminal closed (SIGHUP)".to_string(),
+        libc::SIGTERM => "brigade was told to stop (SIGTERM)".to_string(),
+        other => format!("brigade got signal {other}"),
+    }
 }
 
 /// Ctrl-C, SIGTERM or a closed terminal cancels a foreground run. The worker
@@ -545,7 +570,7 @@ fn print_state(settings: &Settings, dir: &RunDir, state: &State, json: bool, wai
             report::state_json(record, state, dir.path(), dir.worktree_report().as_ref())
         );
     }
-    Ok(match state {
+    match state {
         State::Finished(Outcome::Done { session, message }) => {
             if !json {
                 print!(
@@ -553,7 +578,6 @@ fn print_state(settings: &Settings, dir: &RunDir, state: &State, json: bool, wai
                     report::done(record, session.as_deref(), message, dir.worktree_report().as_ref())
                 );
             }
-            ExitCode::SUCCESS
         }
         State::Finished(Outcome::Failed { error }) => {
             if !json {
@@ -562,7 +586,6 @@ fn print_state(settings: &Settings, dir: &RunDir, state: &State, json: bool, wai
                     report::failed(record, error, dir.path(), dir.worktree_report().as_ref())
                 );
             }
-            ExitCode::FAILURE
         }
         State::Finished(outcome @ Outcome::Limited { .. }) => {
             if !json {
@@ -571,7 +594,6 @@ fn print_state(settings: &Settings, dir: &RunDir, state: &State, json: bool, wai
                     report::limited(record, outcome, dir.path(), dir.worktree_report().as_ref())
                 );
             }
-            ExitCode::from(LIMITED)
         }
         State::Finished(Outcome::Cancelled { reason }) => {
             if !json {
@@ -580,13 +602,11 @@ fn print_state(settings: &Settings, dir: &RunDir, state: &State, json: bool, wai
                     report::cancelled(record, reason, dir.path(), dir.worktree_report().as_ref())
                 );
             }
-            ExitCode::FAILURE
         }
         State::Running => {
             if !json {
                 print!("{}", report::still_running(record, waited));
             }
-            ExitCode::from(STILL_RUNNING)
         }
         State::Waiting => {
             if !json {
@@ -595,15 +615,23 @@ fn print_state(settings: &Settings, dir: &RunDir, state: &State, json: bool, wai
                     report::still_waiting(record, &waiting_for(settings, record), waited)
                 );
             }
-            ExitCode::from(STILL_RUNNING)
         }
         State::Lost => {
             if !json {
                 eprint!("{}", report::lost(record, dir.path()));
             }
-            ExitCode::FAILURE
         }
-    })
+    }
+    Ok(exit_code(state))
+}
+
+fn exit_code(state: &State) -> ExitCode {
+    match state {
+        State::Finished(Outcome::Done { .. }) => ExitCode::SUCCESS,
+        State::Finished(Outcome::Limited { .. }) => ExitCode::from(LIMITED),
+        State::Finished(Outcome::Failed { .. } | Outcome::Cancelled { .. }) | State::Lost => ExitCode::FAILURE,
+        State::Running | State::Waiting => ExitCode::from(STILL_RUNNING),
+    }
 }
 
 fn read_task(words: &[String]) -> Result<String, String> {
