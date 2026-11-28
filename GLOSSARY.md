@@ -4,6 +4,8 @@
 
 **Catalog**: the agents any account can opt into: each one's model id in every harness that has it, the efforts it takes there, and what it's best for.
 
+**Benchmark**: how a catalog agent's model scored on the roster's benchmark source (the Artificial Analysis Intelligence Index by default): its index score, the cost and minutes of one index task, and the effort measured at. It's for comparing agents when picking one for a task, and goes stale, so the source names when it was read.
+
 **Route**: an agent as one account offers it: the harness, model and account a run on it uses. An agent several accounts offer has a route through each, and a run takes the first route with capacity, in account order.
 
 **Agent**: a named intelligence a task can go to, like opus or sol: a catalog entry, or an account's own agent with its model, harness and optionally an effort and extra environment and CLI arguments. With no effort in the roster or on the call, the harness's own default effort applies.

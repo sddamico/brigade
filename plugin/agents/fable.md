@@ -1,6 +1,6 @@
 ---
 name: fable
-description: "Claude Fable in Claude Code (best for the hardest, longest work), run in its own CLI through brigade. Use when the user asks for fable by name: \"spin up fable\", \"ask fable\", \"have fable review this\", \"a team of fable subagents\". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write \"use your own worktree\" in the prompt and leave `Workspace` unset; brigade makes the worktree."
+description: "Claude Fable in Claude Code (best for the most ambitious, open-ended technical work), run in its own CLI through brigade. Use when the user asks for fable by name: \"spin up fable\", \"ask fable\", \"have fable review this\", \"a team of fable subagents\". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write \"use your own worktree\" in the prompt and leave `Workspace` unset; brigade makes the worktree."
 model: flash
 tools: [run_command]
 commandExecutionPolicy: eager

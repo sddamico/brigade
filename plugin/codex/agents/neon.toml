@@ -1,5 +1,5 @@
 name = "neon"
-description = """Gemini 4 Neon in Antigravity, run in its own CLI through brigade. Use when the user asks for neon by name: "spin up neon", "ask neon", "have neon review this", "a team of neon subagents". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write "use your own worktree" in the message."""
+description = """Gemini 4 Neon in Antigravity (best for frontier-level work, balancing depth and speed; strong on legal and finance), run in its own CLI through brigade. Use when the user asks for neon by name: "spin up neon", "ask neon", "have neon review this", "a team of neon subagents". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write "use your own worktree" in the message."""
 model = "gpt-6.1-terra"
 model_reasoning_effort = "low"
 developer_instructions = """

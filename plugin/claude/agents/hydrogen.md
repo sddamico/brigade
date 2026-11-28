@@ -1,6 +1,6 @@
 ---
 name: hydrogen
-description: "Gemini 4 Hydrogen in Antigravity, run in its own CLI through brigade. Use when the user asks for hydrogen by name: \"spin up hydrogen\", \"ask hydrogen\", \"have hydrogen review this\", \"a team of hydrogen subagents\". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write \"use your own worktree\" in the prompt and leave the Agent call's `isolation` unset; brigade makes the worktree."
+description: "Gemini 4 Hydrogen in Antigravity (best for fast, cheap execution of agent workflows), run in its own CLI through brigade. Use when the user asks for hydrogen by name: \"spin up hydrogen\", \"ask hydrogen\", \"have hydrogen review this\", \"a team of hydrogen subagents\". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write \"use your own worktree\" in the prompt and leave the Agent call's `isolation` unset; brigade makes the worktree."
 model: sonnet
 tools: Bash
 ---

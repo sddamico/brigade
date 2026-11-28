@@ -390,6 +390,7 @@ mod tests {
             effort: None,
             efforts: Vec::new(),
             best_for: None,
+            benchmark: None,
             description: String::new(),
             env: BTreeMap::new(),
             args: Vec::new(),

@@ -4,7 +4,7 @@
 use crate::accounts::{Limit, local_time};
 use crate::capacity::AccountCapacity;
 use crate::harness::{Access, Effort};
-use crate::roster::{Entry, Source};
+use crate::roster::{BenchmarkSource, Entry, Source};
 use crate::runs::{Outcome, Run, RunRecord, State};
 use crate::worktree::{WorktreeReport, WorktreeState};
 use serde_json::json;
@@ -278,8 +278,14 @@ pub fn state_json(record: &RunRecord, state: &State, logs: &Path, worktree: Opti
 
 /// One line per agent, then one per route: the account, harness and model it
 /// runs on there.
-pub fn roster(agents: &[&Entry], routes: &[Entry], user_file: &Path) -> String {
+pub fn roster(agents: &[&Entry], routes: &[Entry], source: Option<&BenchmarkSource>, user_file: &Path) -> String {
     let mut out = String::new();
+    if let Some(source) = source {
+        out.push_str(&format!(
+            "Scores are from the {} ({}), read {}.\n\n",
+            source.name, source.url, source.read
+        ));
+    }
     for entry in agents {
         let agent = &entry.agent;
         let best_for = agent
@@ -291,7 +297,17 @@ pub fn roster(agents: &[&Entry], routes: &[Entry], user_file: &Path) -> String {
             Some(fallback) => format!(" Falls back to {fallback} on a usage limit."),
             None => String::new(),
         };
-        out.push_str(&format!("{}:{best_for}{fallback}\n", agent.name));
+        let score = agent
+            .benchmark
+            .as_ref()
+            .map(|b| {
+                format!(
+                    " Scores {} at effort {}, ${:.2} and {:.0} min a task.",
+                    b.intelligence, b.effort, b.cost_per_task, b.minutes_per_task
+                )
+            })
+            .unwrap_or_default();
+        out.push_str(&format!("{}:{best_for}{score}{fallback}\n", agent.name));
         for route in routes.iter().filter(|r| r.agent.name == agent.name) {
             let source = match route.source {
                 Source::BuiltIn => String::new(),

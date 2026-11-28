@@ -1,6 +1,6 @@
 ---
 name: astra
-description: "GPT-6.2 Astra in Codex (best for complex coding), run in its own CLI through brigade. Use when the user asks for astra by name: \"spin up astra\", \"ask astra\", \"have astra review this\", \"a team of astra subagents\". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write \"use your own worktree\" in the prompt and leave the Agent call's `isolation` unset; brigade makes the worktree."
+description: "GPT-6.2 Astra in Codex (best for the hardest projects and scientific work), run in its own CLI through brigade. Use when the user asks for astra by name: \"spin up astra\", \"ask astra\", \"have astra review this\", \"a team of astra subagents\". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write \"use your own worktree\" in the prompt and leave the Agent call's `isolation` unset; brigade makes the worktree."
 model: sonnet
 tools: Bash
 ---

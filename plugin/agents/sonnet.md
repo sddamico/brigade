@@ -1,6 +1,6 @@
 ---
 name: sonnet
-description: "Claude Sonnet in Claude Code (best for fast, capable everyday coding and review), run in its own CLI through brigade. Use when the user asks for sonnet by name: \"spin up sonnet\", \"ask sonnet\", \"have sonnet review this\", \"a team of sonnet subagents\". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write \"use your own worktree\" in the prompt and leave `Workspace` unset; brigade makes the worktree."
+description: "Claude Sonnet in Claude Code (best for well-scoped everyday tasks, bug fixes and documents), run in its own CLI through brigade. Use when the user asks for sonnet by name: \"spin up sonnet\", \"ask sonnet\", \"have sonnet review this\", \"a team of sonnet subagents\". Write the prompt as the agent's own task; its reply comes back with the [brigade] lines without asking. Say in the prompt if the task should change files, which model or effort to use, which session to continue, or which agent to fall back to on a usage limit. For its own worktree, write \"use your own worktree\" in the prompt and leave `Workspace` unset; brigade makes the worktree."
 model: flash
 tools: [run_command]
 commandExecutionPolicy: eager

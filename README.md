@@ -36,9 +36,9 @@ Runs are read-only unless asked to write, and use the agent's model at the harne
 The CLI, with cargo or mise:
 
 ```sh
-cargo install --git https://github.com/sddamico/brigade --tag v0.7.0
+cargo install --git https://github.com/sddamico/brigade --tag v0.7.1
 # or, in ~/.config/mise/config.toml:
-# "cargo:https://github.com/sddamico/brigade" = "tag:v0.7.0"
+# "cargo:https://github.com/sddamico/brigade" = "tag:v0.7.1"
 ```
 
 The plugin, from this repo's marketplace:
@@ -50,13 +50,13 @@ claude plugin install brigade@brigade
 codex plugin marketplace add https://github.com/sddamico/brigade.git
 codex plugin add brigade@brigade
 
-agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.7.0
+agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.7.1
 ```
 
 Codex plugins can't ship subagent roles, so link the roles from Codex's copy of the plugin into `~/.codex/agents`, which Codex searches recursively. Re-point it after a plugin update:
 
 ```sh
-ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.7.0/codex/agents ~/.codex/agents/brigade
+ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.7.1/codex/agents ~/.codex/agents/brigade
 ```
 
 Each agent needs its harness's CLI installed and logged in.
@@ -128,7 +128,7 @@ args = ["--disallowedTools", "Artifact"]
 env = { ANTHROPIC_BASE_URL = "$LOCAL_MODEL_SERVER" }
 ```
 
-An agent more than one account offers has a route through each. `brigade run opus` takes the first route with capacity, in account order: built-in accounts first, a user account that replaces one keeping its place, then the user's others. A route that's limited or full is passed over without spending a call, and a run that hits a limit moves to the next route. `--account <account>` pins a route. `env` and `args` go to the harness's CLI, and `$VAR` and `${VAR}` expand from brigade's environment. Catalog entries of your own (`[[catalog]]`, as in [roster.toml](roster.toml)) add agents any account can opt into. `brigade list` shows every agent, what it's best for, and its routes.
+An agent more than one account offers has a route through each. `brigade run opus` takes the first route with capacity, in account order: built-in accounts first, a user account that replaces one keeping its place, then the user's others. A route that's limited or full is passed over without spending a call, and a run that hits a limit moves to the next route. `--account <account>` pins a route. `env` and `args` go to the harness's CLI, and `$VAR` and `${VAR}` expand from brigade's environment. Catalog entries of your own (`[[catalog]]`, as in [roster.toml](roster.toml)) add agents any account can opt into. `brigade list` shows every agent, what it's best for, its routes, and how its model scored on the Artificial Analysis Intelligence Index: the score, and the cost and minutes of one of the index's tasks. A `[benchmark_source]` and `benchmark = { ... }` on catalog entries of your own refresh or extend them.
 
 ## Limits and quotas
 

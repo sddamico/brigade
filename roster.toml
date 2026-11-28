@@ -14,73 +14,98 @@
 # An agent more than one account offers has a route through each, and a run
 # takes the first route with capacity, in account order.
 #
+# Each catalog agent's benchmark is its model's score on the source below at
+# the effort named: the index, what one of its tasks cost in US dollars, and
+# how long one took. They're there to compare agents when picking one for a
+# task; refresh them from the source now and then.
+#
 # A user roster can also declare harnesses of its own in [[harness]] tables
 # (see the README), and have a [fallbacks] table, `sol = "opus"`, naming the
 # agent a run switches to when every route of its agent is limited.
 
+[benchmark_source]
+name = "Artificial Analysis Intelligence Index v5.0.2"
+url = "https://artificialanalysis.ai/leaderboards/models"
+read = "2026-11-27"
+
 [[catalog]]
 name = "fable"
 description = "Claude Fable"
-best_for = "the hardest, longest work"
+best_for = "the most ambitious, open-ended technical work"
+benchmark = { intelligence = 65, cost_per_task = 26.54, minutes_per_task = 40.4, effort = "max" }
 models = { claude = "fable" }
 
 [[catalog]]
 name = "opus"
 description = "Claude Opus"
-best_for = "deep reasoning, architecture and hard debugging"
+best_for = "agentic coding, computer use and knowledge work; Anthropic's daily driver"
+benchmark = { intelligence = 59, cost_per_task = 10.04, minutes_per_task = 24.7, effort = "max" }
 models = { claude = "opus", agy = "claude-opus-5-5" }
 efforts = { agy = ["low", "medium", "high"] }
 
 [[catalog]]
 name = "sonnet"
 description = "Claude Sonnet"
-best_for = "fast, capable everyday coding and review"
+best_for = "well-scoped everyday tasks, bug fixes and documents"
+benchmark = { intelligence = 55, cost_per_task = 10.02, minutes_per_task = 31.1, effort = "max" }
 models = { claude = "sonnet", agy = "claude-sonnet-5-5" }
 efforts = { agy = ["low", "medium", "high"] }
 
 [[catalog]]
 name = "haiku"
 description = "Claude Haiku"
-best_for = "quick, cheap small tasks"
+best_for = "high-volume, cheap tasks: summaries, classification, subagent work"
+benchmark = { intelligence = 37, cost_per_task = 0.41, minutes_per_task = 15.4, effort = "max" }
 models = { claude = "haiku" }
 
 [[catalog]]
 name = "sol"
 description = "GPT-6.2 Sol"
-best_for = "coding and everyday work"
+best_for = "efficient everyday work"
+benchmark = { intelligence = 57, cost_per_task = 1.01, minutes_per_task = 11.7, effort = "max" }
 models = { codex = "gpt-6.2-sol" }
 
 [[catalog]]
 name = "astra"
 description = "GPT-6.2 Astra"
-best_for = "complex coding"
+best_for = "the hardest projects and scientific work"
+benchmark = { intelligence = 62, cost_per_task = 4.00, minutes_per_task = 16.8, effort = "max" }
 models = { codex = "gpt-6.2-astra" }
 
 [[catalog]]
 name = "terra"
 description = "GPT-6.1 Terra"
-best_for = "everyday coding at a lower cost than Sol"
+best_for = "routine work at low cost"
+benchmark = { intelligence = 51, cost_per_task = 0.96, minutes_per_task = 16.3, effort = "max" }
 models = { codex = "gpt-6.1-terra" }
 
 [[catalog]]
 name = "neon"
 description = "Gemini 4 Neon"
+best_for = "frontier-level work, balancing depth and speed; strong on legal and finance"
+benchmark = { intelligence = 62, cost_per_task = 6.44, minutes_per_task = 26.2, effort = "xhigh" }
 models = { agy = "gemini-4-neon" }
 
 [[catalog]]
 name = "hydrogen"
 description = "Gemini 4 Hydrogen"
+best_for = "fast, cheap execution of agent workflows"
+benchmark = { intelligence = 54, cost_per_task = 3.16, minutes_per_task = 14.3, effort = "xhigh" }
 models = { agy = "gemini-4-hydrogen" }
 
 [[catalog]]
 name = "carbon"
 description = "Gemini 4 Carbon"
+best_for = "the hardest long-horizon work, and security"
+benchmark = { intelligence = 60, cost_per_task = 7.76, minutes_per_task = 41.3, effort = "high" }
 models = { agy = "gemini-4-carbon" }
 efforts = { agy = ["low", "medium", "high"] }
 
 [[catalog]]
 name = "argon"
 description = "Gemini 4 Argon"
+best_for = "real-world coding, enterprise knowledge work and cyber defense"
+benchmark = { intelligence = 51, cost_per_task = 7.06, minutes_per_task = 24.8, effort = "high" }
 models = { agy = "gemini-4-argon" }
 efforts = { agy = ["low", "medium", "high"] }
 

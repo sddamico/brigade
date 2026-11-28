@@ -150,7 +150,12 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
             } else {
                 print!(
                     "{}",
-                    report::roster(&roster.agents(), roster.entries(), &settings.roster_file)
+                    report::roster(
+                        &roster.agents(),
+                        roster.entries(),
+                        roster.benchmark_source(),
+                        &settings.roster_file
+                    )
                 );
             }
             Ok(ExitCode::SUCCESS)

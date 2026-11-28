@@ -34,6 +34,8 @@ pub struct Agent {
     /// What the agent is best at, for whoever picks agents for tasks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_for: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark: Option<Benchmark>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -64,6 +66,29 @@ impl Agent {
             }
         }
     }
+}
+
+/// How the agent's model scored on the roster's benchmark source, for comparing
+/// agents when picking one for a task.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Benchmark {
+    /// Its score on the source's index.
+    pub intelligence: f64,
+    /// What one of the index's tasks cost, in US dollars.
+    pub cost_per_task: f64,
+    pub minutes_per_task: f64,
+    /// The effort the figures were measured at.
+    pub effort: Effort,
+}
+
+/// Where the catalog's benchmark figures come from, and when they were read.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchmarkSource {
+    pub name: String,
+    pub url: String,
+    pub read: String,
 }
 
 /// The credentials a route's runs draw on, and so share usage limits with.
@@ -109,6 +134,7 @@ pub struct Entry {
 pub struct Roster {
     /// Every route, in account order.
     entries: Vec<Entry>,
+    benchmark_source: Option<BenchmarkSource>,
     accounts: Vec<AccountDef>,
     /// The harnesses the user roster declares.
     harnesses: Vec<CustomHarness>,
@@ -165,6 +191,8 @@ impl fmt::Display for RosterError {
 #[serde(deny_unknown_fields)]
 struct RosterFile {
     #[serde(default)]
+    benchmark_source: Option<BenchmarkSource>,
+    #[serde(default)]
     catalog: Vec<CatalogEntry>,
     #[serde(default)]
     account: Vec<AccountEntry>,
@@ -183,6 +211,8 @@ struct CatalogEntry {
     description: String,
     #[serde(default)]
     best_for: Option<String>,
+    #[serde(default)]
+    benchmark: Option<Benchmark>,
     /// Harness name to the model id that harness calls it.
     models: BTreeMap<String, String>,
     /// Harness name to the efforts the model takes there, where fewer than the
@@ -229,6 +259,8 @@ struct OwnAgent {
     #[serde(default)]
     best_for: Option<String>,
     #[serde(default)]
+    benchmark: Option<Benchmark>,
+    #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
     args: Vec<String>,
@@ -270,6 +302,10 @@ impl Roster {
             built_in.catalog.into_iter().map(|c| (c, BUILT_IN_ORIGIN)).collect();
         let mut accounts: Vec<(AccountEntry, Source)> =
             built_in.account.into_iter().map(|a| (a, Source::BuiltIn)).collect();
+        let benchmark_source = user
+            .as_ref()
+            .and_then(|(file, _)| file.benchmark_source.clone())
+            .or(built_in.benchmark_source);
         let (harnesses, fallbacks, user_origin) = match &user {
             Some((file, origin)) => (file.harness.clone(), file.fallbacks.clone(), origin.as_str()),
             None => (Vec::new(), BTreeMap::new(), BUILT_IN_ORIGIN),
@@ -368,6 +404,7 @@ impl Roster {
                         model: model.clone(),
                         effort: None,
                         best_for: entry.best_for.clone(),
+                        benchmark: entry.benchmark.clone(),
                         env: account.env.clone(),
                         args: account.args.clone(),
                         account: reference.clone(),
@@ -401,6 +438,7 @@ impl Roster {
                     efforts: own.efforts.clone(),
                     description: own.description.clone(),
                     best_for: own.best_for.clone(),
+                    benchmark: own.benchmark.clone(),
                     env,
                     args: account.args.iter().chain(&own.args).cloned().collect(),
                     account: reference.clone(),
@@ -425,6 +463,7 @@ impl Roster {
 
         let mut roster = Roster {
             entries,
+            benchmark_source,
             accounts: defs,
             harnesses,
         };
@@ -457,6 +496,10 @@ impl Roster {
             }
         }
         Ok(())
+    }
+
+    pub fn benchmark_source(&self) -> Option<&BenchmarkSource> {
+        self.benchmark_source.as_ref()
     }
 
     pub fn harnesses(&self) -> &[CustomHarness] {
@@ -587,6 +630,11 @@ mod tests {
         assert_eq!(via_agy.model, "claude-opus-5-5");
         assert_eq!(via_agy.description, "Claude Opus in Antigravity");
         assert_eq!(via_agy.efforts(), [Effort::Low, Effort::Medium, Effort::High]);
+        assert_eq!(
+            via_agy.benchmark.as_ref().map(|b| b.intelligence),
+            Some(59.0),
+            "a route carries its agent's figures"
+        );
         assert_eq!(roster.names().iter().filter(|n| **n == "opus").count(), 1);
     }
 
