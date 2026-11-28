@@ -36,9 +36,9 @@ Runs are read-only unless asked to write, and use the agent's model at the harne
 The CLI, with cargo or mise:
 
 ```sh
-cargo install --git https://github.com/sddamico/brigade --tag v0.3.4
+cargo install --git https://github.com/sddamico/brigade --tag v0.3.5
 # or, in ~/.config/mise/config.toml:
-# "cargo:https://github.com/sddamico/brigade" = "tag:v0.3.4"
+# "cargo:https://github.com/sddamico/brigade" = "tag:v0.3.5"
 ```
 
 The plugin, from this repo's marketplace:
@@ -50,13 +50,13 @@ claude plugin install brigade@brigade
 codex plugin marketplace add https://github.com/sddamico/brigade.git
 codex plugin add brigade@brigade
 
-agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.3.4
+agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.3.5
 ```
 
 Codex plugins can't ship subagent roles, so link the roles from Codex's copy of the plugin into `~/.codex/agents`, which Codex searches recursively. Re-point it after a plugin update:
 
 ```sh
-ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.3.4/codex/agents ~/.codex/agents/brigade
+ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.3.5/codex/agents ~/.codex/agents/brigade
 ```
 
 Each agent needs its harness's CLI installed and logged in.

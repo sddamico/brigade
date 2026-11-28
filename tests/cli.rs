@@ -799,7 +799,7 @@ fn a_worktree_agent_is_told_to_leave_the_checkout_alone_and_caught_when_it_doesn
     let out = stdout(&output);
     assert!(
         out.contains(&format!(
-            "[brigade] warning: the agent worked in the user's checkout {} instead of only its worktree, and it's on branch escaped now, not branch main",
+            "[brigade] warning: the user's checkout {} changed during the run: it's on branch escaped now, not branch main. Unless the user did that, the agent worked there",
             work.display()
         )),
         "{out}"

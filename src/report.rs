@@ -105,8 +105,8 @@ fn worktree_lines(record: &RunRecord, report: Option<&WorktreeReport>) -> String
     let (path, branch) = (worktree.path.display(), &worktree.branch);
     let mut out = match report.and_then(|r| r.checkout_changed.as_ref()) {
         Some(change) => format!(
-            "[brigade] warning: the agent worked in the user's checkout {} instead of only its worktree, and {change}. \
-             Check that checkout before carrying on\n",
+            "[brigade] warning: the user's checkout {} changed during the run: {change}. Unless the user did that, \
+             the agent worked there instead of in its worktree. Check that checkout before carrying on\n",
             worktree.checkout.display()
         ),
         None => String::new(),
