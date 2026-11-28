@@ -92,6 +92,8 @@ pub fn create(settings: &Settings, cwd: &Path, run_id: &str) -> Result<(Worktree
         return Err(error);
     }
     let base = git(&path, &["rev-parse", "HEAD"])?.trim().to_string();
+    // Deleting the branch deletes this with it.
+    let _ = git(&path, &["config", &base_key(&branch), &base]);
     // `git rev-parse --show-prefix` is empty at the repo root, and joining it
     // would leave a trailing slash in the paths brigade prints.
     let run_cwd = if prefix.is_empty() {
@@ -130,8 +132,13 @@ pub fn existing(settings: &Settings, cwd: &Path) -> Option<Worktree> {
     }
     let repo = main_checkout(&path).ok()?;
     let (checkout_head, checkout_branch) = position(&repo).ok()?;
+    let base = match git(&path, &["config", &base_key(&branch)]) {
+        Ok(base) => base,
+        // A worktree made before brigade recorded its base.
+        Err(_) => git(&path, &["rev-parse", "HEAD"]).ok()?,
+    };
     Some(Worktree {
-        base: git(&path, &["rev-parse", "HEAD"]).ok()?.trim().to_string(),
+        base: base.trim().to_string(),
         path,
         branch,
         checkout: repo.clone(),
@@ -235,6 +242,28 @@ pub fn tidy(worktree: &Worktree) -> WorktreeState {
         Ok(_) => WorktreeState::Removed,
         Err(_) => WorktreeState::Kept,
     }
+}
+
+/// Where the commit a brigade worktree started from is kept.
+fn base_key(branch: &str) -> String {
+    format!("branch.{branch}.brigadeBase")
+}
+
+/// For a pruned run's worktree that no remaining run uses: removes it and its
+/// branch if it's still clean at the commit it started from, whichever run
+/// last worked in it. A worktree whose starting commit isn't known is kept.
+pub fn tidy_abandoned(worktree: &Worktree) -> WorktreeState {
+    let recorded = git(&worktree.path, &["config", &base_key(&worktree.branch)]).map(|b| b.trim().to_string());
+    let base = match recorded {
+        Ok(base) => base,
+        Err(_) if !worktree.reused => worktree.base.clone(),
+        Err(_) => return WorktreeState::Kept,
+    };
+    tidy(&Worktree {
+        base,
+        reused: false,
+        ..worktree.clone()
+    })
 }
 
 fn toplevel(dir: &Path) -> Option<PathBuf> {

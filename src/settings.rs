@@ -42,6 +42,9 @@ impl Settings {
         let state = set("XDG_STATE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/state"));
+        // A run's cwd is resolved through symlinks, so worktree paths under
+        // the state dir have to be too, or they never match.
+        let state = state.canonicalize().unwrap_or(state);
         let depth = match set(DEPTH_VAR) {
             Some(value) => value
                 .parse()

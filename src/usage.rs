@@ -170,7 +170,11 @@ fn agy_quotas(text: &str) -> Result<Vec<Quota>, String> {
             quotas.push(Quota {
                 name: format!("{name}, {}", bucket["window"].as_str().unwrap_or("window")),
                 used: 1.0 - remaining,
-                resets_at: bucket["reset_time"].as_str().and_then(accounts::utc_epoch),
+                // A window with no reset comes with the epoch itself.
+                resets_at: bucket["reset_time"]
+                    .as_str()
+                    .and_then(accounts::utc_epoch)
+                    .filter(|&at| at > 0),
                 models: (!models.is_empty()).then(|| models.clone()),
             });
         }

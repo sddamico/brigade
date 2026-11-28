@@ -395,7 +395,8 @@ reach of agy's terminal sandbox. Without a sandbox there's no such parameter; le
         Harness::Codex => format!(
             "\n\n   Run this and every brigade call after it with `sandbox_permissions: \"require_escalated\"` and the \
 justification \"brigade starts {name}'s own CLI, which needs the network and its own config\". Inside Codex's \
-sandbox, brigade refuses to start a run."
+sandbox, brigade refuses to start a run. If the call fails before brigade even runs (\"read-only file system\", \
+say), that's the sandbox too: reply that brigade needs escalated permissions in this session."
         ),
         Harness::Claude | Harness::Custom(_) => String::new(),
     };

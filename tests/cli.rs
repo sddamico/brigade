@@ -2013,3 +2013,96 @@ fn continuing_a_run_past_its_week_keeps_the_worktree_it_runs_in() {
         "the old run is pruned"
     );
 }
+
+fn age_run(sandbox: &Sandbox, id: &str, days: u64) {
+    let record = sandbox.root().join("state/brigade/runs").join(id).join("run.json");
+    let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    value["started_at"] = serde_json::json!(value["started_at"].as_u64().unwrap() - days * 24 * 60 * 60);
+    fs::write(&record, value.to_string()).unwrap();
+}
+
+#[test]
+fn a_worktree_left_unchanged_by_a_run_and_its_follow_up_goes_with_the_last_of_them() {
+    let sandbox = Sandbox::new();
+    let work = sandbox.repo();
+    let (id, worktree) = unchanged_worktree_run(&sandbox);
+    let follow_up = sandbox.brigade(&[
+        "run",
+        "hydrogen",
+        "--write",
+        "--cwd",
+        worktree.to_str().unwrap(),
+        "more",
+    ]);
+    assert!(follow_up.status.success(), "{}", stderr(&follow_up));
+    age_run(&sandbox, &id, 8);
+    sandbox.brigade(&["run", "opus", "unrelated"]);
+    assert!(worktree.is_dir(), "the follow-up still uses it");
+
+    sandbox.brigade(&["runs", "--prune"]);
+    assert!(!worktree.exists());
+    assert_eq!(git_in(&work, &["branch", "--list", "brigade/*"]), "");
+}
+
+#[test]
+fn pruning_keeps_a_worktree_whose_first_run_committed() {
+    let sandbox = Sandbox::new();
+    sandbox.repo();
+    let first = sandbox
+        .command(&["run", "hydrogen", "--write", "--worktree", "--json", "build"])
+        .env("FAKE_WRITE", "made.txt")
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let worktree = PathBuf::from(value["run"]["worktree"]["path"].as_str().unwrap());
+    sandbox.brigade(&[
+        "run",
+        "hydrogen",
+        "--write",
+        "--cwd",
+        worktree.to_str().unwrap(),
+        "look",
+    ]);
+    sandbox.brigade(&["runs", "--prune"]);
+    assert!(worktree.join("made.txt").exists(), "pruning deleted committed work");
+}
+
+#[test]
+fn a_symlinked_state_dir_still_knows_its_worktrees() {
+    let sandbox = Sandbox::new();
+    let work = sandbox.repo();
+    let real = sandbox.root().join("state");
+    fs::create_dir_all(&real).unwrap();
+    let link = sandbox.root().join("state-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let first = sandbox
+        .command(&["run", "hydrogen", "--write", "--worktree", "--json", "start"])
+        .env("XDG_STATE_HOME", &link)
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let branch = value["run"]["worktree"]["branch"].as_str().unwrap().to_string();
+    let via_link = link
+        .join("brigade/worktrees/work")
+        .join(branch.trim_start_matches("brigade/"));
+
+    let edit = sandbox
+        .command(&[
+            "run",
+            "hydrogen",
+            "--write",
+            "--cwd",
+            via_link.to_str().unwrap(),
+            "edit",
+        ])
+        .env("XDG_STATE_HOME", &link)
+        .env("FAKE_WRITE", "edit.txt")
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&edit).contains("its changes are committed as "),
+        "{}",
+        stdout(&edit)
+    );
+    assert_eq!(git_in(&work, &["log", "--format=%s", "-1", &branch]).trim(), "edit");
+}

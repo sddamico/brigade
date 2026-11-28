@@ -19,7 +19,7 @@ brigade is two pieces:
 - A CLI, `brigade`, that runs a task on a roster agent headless (`claude -p`, `codex exec`, `agy -p`) and prints its final reply, plus a session id to continue it with
 - A plugin for all three harnesses. It has a skill that teaches the host agent the roster and how to start agents, and a subagent definition per agent in each harness's own format
 
-brigade only stands in for agents that live in another CLI. An agent from the host's own family stays on the host's ordinary subagents: opus in Claude Code is the Agent tool with `model: "opus"`, and sol in Codex is `spawn_agent` with `model: "gpt-6.2-sol"`. Every other agent gets a forwarder, a subagent on a small model of the host's that hands the task to `brigade run` and returns the reply unchanged.
+brigade only stands in for agents that live in another CLI. An agent from the host's own family stays on the host's ordinary subagents: opus in Claude Code is the Agent tool with `model: "opus"`, and sol in Codex is `spawn_agent` with `model: "gpt-6.2-sol"`. Every other agent gets a forwarder, a subagent that hands the task to `brigade run` and returns the reply unchanged. It runs on a small model in Claude Code and Codex, and on the session's own model in agy, whose small tiers draw on a separate Gemini allowance.
 
 | Host | Its own agents (no brigade) | Through a brigade forwarder |
 |---|---|---|
@@ -36,9 +36,9 @@ Runs are read-only unless asked to write, and use the agent's model at the harne
 The CLI, with cargo or mise:
 
 ```sh
-cargo install --git https://github.com/sddamico/brigade --tag v0.9.5
+cargo install --git https://github.com/sddamico/brigade --tag v0.9.6
 # or, in ~/.config/mise/config.toml:
-# "cargo:https://github.com/sddamico/brigade" = "tag:v0.9.5"
+# "cargo:https://github.com/sddamico/brigade" = "tag:v0.9.6"
 ```
 
 The plugin, from this repo's marketplace:
@@ -50,13 +50,13 @@ claude plugin install brigade@brigade
 codex plugin marketplace add https://github.com/sddamico/brigade.git
 codex plugin add brigade@brigade
 
-agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.9.5
+agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.9.6
 ```
 
 Codex plugins can't ship subagent roles, so link the roles from Codex's copy of the plugin into `~/.codex/agents`, which Codex searches recursively. Re-point it after a plugin update:
 
 ```sh
-ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.9.5/codex/agents ~/.codex/agents/brigade
+ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.9.6/codex/agents ~/.codex/agents/brigade
 ```
 
 Each agent needs its harness's CLI installed and logged in.
@@ -91,7 +91,7 @@ A run's directory under `$XDG_STATE_HOME/brigade/runs` (`~/.local/state/brigade/
 
 A write run in a worktree commits its changes with the task's first line as the subject. A read-only run never commits, even inside a worktree. A run that changed nothing keeps its worktree, so its session can be continued there, until the run is deleted.
 
-brigade can't start a run from inside a host's sandbox, since the agent's CLI needs the network and its own config. Its forwarders ask to run outside it: with `BypassSandbox` in agy, and with `sandbox_permissions: "require_escalated"` in Codex, which asks you to approve it unless your approval settings already allow `brigade`.
+brigade can't start a run from inside a host's sandbox, since the agent's CLI needs the network and its own config. Its forwarders ask to run outside it: with `BypassSandbox` in agy, and with `sandbox_permissions: "require_escalated"` in Codex, which asks you to approve it unless your approval settings already allow `brigade`. agy in print mode (`agy --print`) under request-review or strict permissions denies those commands without telling the session, so headless agy needs always-proceed for brigade.
 
 ## Accounts and routes
 

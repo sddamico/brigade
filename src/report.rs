@@ -129,7 +129,8 @@ pub fn limited(record: &RunRecord, outcome: &Outcome, logs: &Path, worktree: Opt
     let when = match (until, retry_at) {
         (Some(until), _) => format!("[brigade] {limited} is limited until {}\n", local_time(*until)),
         (None, Some(retry)) => format!(
-            "[brigade] {harness} gave no reset time, so brigade lets one run try {limited} again after {}\n",
+            "[brigade] brigade has no reset time it can use from {harness}, so it lets one run try {limited} again \
+             after {}\n",
             local_time(*retry)
         ),
         (None, None) => String::new(),

@@ -51,7 +51,7 @@ An agent from your own harness's family runs on your ordinary subagents; brigade
 - neon and hydrogen: `invoke_subagent` with `TypeName: "self"`. agy subagents can only pick a tier, not a model id, so `Model: "inherit"` keeps the session's own model. When the session is on another model than the one asked for, use `TypeName: "forward"` with `agent: <name>` (neon or hydrogen) at the top of the prompt instead
 - opus, fable, sonnet, sol and astra: `invoke_subagent` with `TypeName: "<name>"`, a forwarder, with routing in the prompt as above
 - An agent from the user's roster: `TypeName: "<name>"` once the user has run `brigade install-agents`, otherwise `TypeName: "forward"`, with `agent: <name>` at the top of the prompt
-- When agy's terminal sandbox is on, run brigade from the shell with `BypassSandbox: true`: it starts other agents' CLIs, which need the network and config outside the sandbox. With the sandbox off, `run_command` has no such parameter
+- When agy's terminal sandbox is on, run brigade from the shell with `BypassSandbox: true`: it starts other agents' CLIs, which need the network and config outside the sandbox. With the sandbox off, `run_command` has no such parameter. In print mode under request-review or strict permissions, agy denies brigade's commands and the forwarder stops without a reply: tell the user brigade needs always-proceed there
 
 ### From a shell
 

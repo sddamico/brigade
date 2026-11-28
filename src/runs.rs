@@ -944,11 +944,16 @@ fn commit_message(record: &RunRecord, task: &str) -> String {
 /// to fit 72 characters.
 fn subject(task: &str) -> String {
     let fence = |l: &str| l.trim_start().starts_with("```") || l.trim_start().starts_with("~~~");
-    let line = task
-        .lines()
-        .find(|l| !fence(l) && l.chars().any(char::is_alphanumeric))
-        .unwrap_or("")
-        .trim();
+    let words = |l: &&str| !fence(l) && l.chars().any(char::is_alphanumeric);
+    let mut in_block = false;
+    let prose = task.lines().find(|l| {
+        if fence(l) {
+            in_block = !in_block;
+        }
+        !in_block && words(l)
+    });
+    // A task that is all code takes its first line of code.
+    let line = prose.or_else(|| task.lines().find(words)).unwrap_or("").trim();
     if line.chars().count() <= 72 {
         line.to_string()
     } else {
@@ -992,7 +997,7 @@ pub fn prune(settings: &Settings, keep: Duration, starting_in: Option<&Path>) ->
                 .filter(|w| !in_use.contains(&w.path.as_path()))
                 .filter(|w| starting_in.is_none_or(|cwd| !cwd.starts_with(&w.path)))
             {
-                worktree::tidy(worktree);
+                worktree::tidy_abandoned(worktree);
             }
             fs::remove_dir_all(run.dir.path()).is_ok()
         })
@@ -1065,8 +1070,12 @@ mod tests {
     fn a_commit_subject_is_the_tasks_first_line_of_words_cut_at_a_word() {
         assert_eq!(subject("\n\n  Fix the parser\nmore"), "Fix the parser");
         assert_eq!(subject("```\nfn main() {}\n```"), "fn main() {}");
-        assert_eq!(subject("```diff\n- old\n+ new\n```\napply this"), "- old");
-        assert_eq!(subject("~~~\ncode first\n~~~"), "code first");
+        assert_eq!(subject("```diff\n- old\n+ new\n```\napply this"), "apply this");
+        assert_eq!(
+            subject("  ~~~rust\n  fn main() {}\n  ~~~\nAdd a main function"),
+            "Add a main function"
+        );
+        assert_eq!(subject("~~~\ncode only\n~~~"), "code only");
         let words = format!("{} yyyy zzzz more", "x".repeat(66));
         assert_eq!(subject(&words), format!("{} yyyy…", "x".repeat(66)));
         let split = format!("{} yyyyyy zzzz", "x".repeat(66));
