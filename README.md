@@ -36,9 +36,9 @@ Runs are read-only unless asked to write, and use the agent's model at the harne
 The CLI, with cargo or mise:
 
 ```sh
-cargo install --git https://github.com/sddamico/brigade --tag v0.4.0
+cargo install --git https://github.com/sddamico/brigade --tag v0.5.0
 # or, in ~/.config/mise/config.toml:
-# "cargo:https://github.com/sddamico/brigade" = "tag:v0.4.0"
+# "cargo:https://github.com/sddamico/brigade" = "tag:v0.5.0"
 ```
 
 The plugin, from this repo's marketplace:
@@ -50,13 +50,13 @@ claude plugin install brigade@brigade
 codex plugin marketplace add https://github.com/sddamico/brigade.git
 codex plugin add brigade@brigade
 
-agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.4.0
+agy plugin install ~/.claude/plugins/cache/brigade/brigade/0.5.0
 ```
 
 Codex plugins can't ship subagent roles, so link the roles from Codex's copy of the plugin into `~/.codex/agents`, which Codex searches recursively. Re-point it after a plugin update:
 
 ```sh
-ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.4.0/codex/agents ~/.codex/agents/brigade
+ln -sfn ~/.codex/plugins/cache/brigade/brigade/0.5.0/codex/agents ~/.codex/agents/brigade
 ```
 
 Each agent needs its harness's CLI installed and logged in.
@@ -119,6 +119,56 @@ opus = "sol"
 ```
 
 A run follows at most one fallback, so two agents can fall back to each other. `--fallback <agent>` picks one for a single run and `--no-fallback` turns it off.
+
+## Your own harnesses
+
+A CLI brigade doesn't know can join through a `[[harness]]` table in your roster, which says how to start it and where its output keeps the reply. Agents then run in it by name, and with a `[harness.host]` section it can tag in brigade agents too.
+
+```toml
+[[harness]]
+name = "muse"
+product = "Muse Code"               # what replies call it; the name when unset
+program = "muse-code"
+args = ["exec", "--json", "--model", "{model}"]
+efforts = ["low", "medium", "high"]
+effort_args = ["--effort", "{effort}"]
+read_only_args = ["--read-only"]
+write_args = ["--yolo"]
+resume_args = ["--resume", "{session}"]
+
+[harness.output]
+format = "json"
+reply = "/result"
+session = "/session_id"
+error = "/error"
+limit_signs = ["usage limit", "RESOURCE_EXHAUSTED"]
+
+[harness.host]
+agents_dir = "~/.muse/agents"
+file = "{name}.md"
+template = """
+---
+# {marker}
+name: {name}
+description: {description}
+---
+
+{instructions}
+"""
+
+[[agent]]
+name = "muse"
+harness = "muse"
+model = "muse-2"
+description = "Muse Code on its own model"
+```
+
+- **Command line**: `args`, which must use `{model}`, then `effort_args` when the run has an effort (one of `efforts`, from brigade's low to ultra), `read_only_args` or `write_args`, `resume_args` for a resumed run, and the agent's own `args`. `{prompt}` in an argument puts the task there instead of on stdin, and `{cwd}` is the run's directory
+- **Read-only**: without `read_only_args`, a read-only run is read-only only because its task says so
+- **Output**: `format` is `json` (one object on stdout), `jsonl` (an event per line: the session from the first event that has one, the reply and error from the last) or `text` (stdout is the reply, and a failing exit status a failure). `reply`, `session` and `error` are JSON pointers
+- **Failures and limits**: a non-empty error fails the run. One that contains any of `limit_signs`, or a stderr that does, is a usage limit, which gets the same handling and fallbacks as the built-in harnesses' limits
+- **Hosting**: `brigade install-agents` writes a forwarder for every agent from another harness, plus `forward`, into `agents_dir` (`~/` and `$VAR` expand). It names each file from `file` and fills `template` from `{name}`, `{description}` (quoted, so it fits YAML and TOML), `{instructions}` and `{marker}`, the line brigade knows its own files by, which goes in a comment. `shell_tool` names the harness's shell tool in the instructions, `shell` by default. brigade cleans up a host's directory only while its host section is in the roster
+- The built-in harnesses' names, claude, codex and agy, are taken
 
 ## Development
 

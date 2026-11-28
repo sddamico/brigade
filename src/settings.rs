@@ -1,4 +1,5 @@
 use crate::harness::Harness;
+use crate::invocation::{UnsetVar, expand};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -19,7 +20,8 @@ pub struct Settings {
     pub state_dir: PathBuf,
     pub depth: u32,
     pub lease: Duration,
-    /// Where each harness finds the user's own subagents.
+    pub home: PathBuf,
+    /// Where each built-in harness finds the user's own subagents.
     pub claude_agents_dir: PathBuf,
     pub codex_agents_dir: PathBuf,
     pub agy_agents_dir: PathBuf,
@@ -62,15 +64,28 @@ impl Settings {
             codex_agents_dir: codex.join("agents"),
             // agy only looks at the top of this directory, not in subdirectories.
             agy_agents_dir: home.join(".gemini/config/agents"),
+            home,
         })
     }
 
-    pub fn agents_dir(&self, host: Harness) -> &PathBuf {
-        match host {
-            Harness::Claude => &self.claude_agents_dir,
-            Harness::Codex => &self.codex_agents_dir,
-            Harness::Agy => &self.agy_agents_dir,
-        }
+    /// Where `host` finds the user's own subagents. A custom harness names its
+    /// own directory, where `~/` and `$VAR` expand.
+    pub fn agents_dir(&self, host: &Harness, var: &dyn Fn(&str) -> Option<String>) -> Result<PathBuf, String> {
+        Ok(match host {
+            Harness::Claude => self.claude_agents_dir.clone(),
+            Harness::Codex => self.codex_agents_dir.clone(),
+            Harness::Agy => self.agy_agents_dir.clone(),
+            Harness::Custom(custom) => {
+                let dir = custom.host.as_ref().map(|h| h.agents_dir.as_str()).unwrap_or_default();
+                let dir = expand(dir, var).map_err(|UnsetVar(name)| {
+                    format!("harness `{}`'s agents_dir needs ${name}, which isn't set", custom.name)
+                })?;
+                match dir.strip_prefix("~/") {
+                    Some(rest) => self.home.join(rest),
+                    None => PathBuf::from(dir),
+                }
+            }
+        })
     }
 
     pub fn runs_dir(&self) -> PathBuf {

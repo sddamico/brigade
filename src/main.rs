@@ -139,7 +139,7 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
         }
         Command::InstallAgents => {
             let roster = Roster::load(&settings.roster_file).map_err(|e| e.to_string())?;
-            let changes = install::install(&roster, &settings)?;
+            let changes = install::install(&roster, &settings, &env_var)?;
             if changes.is_empty() {
                 println!("the subagents for your roster's agents are up to date");
             }

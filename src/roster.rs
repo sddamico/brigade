@@ -1,4 +1,5 @@
-use crate::harness::{Effort, Harness};
+use crate::custom::CustomHarness;
+use crate::harness::{BUILT_IN_NAMES, Effort, Harness};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -46,6 +47,8 @@ pub struct Entry {
 #[derive(Debug)]
 pub struct Roster {
     entries: Vec<Entry>,
+    /// The harnesses the user roster declares.
+    harnesses: Vec<CustomHarness>,
 }
 
 #[derive(Debug)]
@@ -63,6 +66,11 @@ pub enum RosterError {
         agent: String,
         problem: String,
     },
+    InvalidHarness {
+        origin: String,
+        harness: String,
+        problem: String,
+    },
 }
 
 impl fmt::Display for RosterError {
@@ -73,6 +81,11 @@ impl fmt::Display for RosterError {
             RosterError::Invalid { origin, agent, problem } => {
                 write!(f, "{origin}: agent `{agent}` {problem}")
             }
+            RosterError::InvalidHarness {
+                origin,
+                harness,
+                problem,
+            } => write!(f, "{origin}: harness `{harness}` {problem}"),
         }
     }
 }
@@ -81,9 +94,34 @@ impl fmt::Display for RosterError {
 #[serde(deny_unknown_fields)]
 struct RosterFile {
     #[serde(default)]
-    agent: Vec<Agent>,
+    agent: Vec<RosterAgent>,
+    #[serde(default)]
+    harness: Vec<CustomHarness>,
     /// Agent name to the agent its runs switch to on a usage limit.
     #[serde(default)]
+    fallbacks: BTreeMap<String, String>,
+}
+
+/// An agent as the roster file writes it: its harness by name, which may be
+/// one the same file declares.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RosterAgent {
+    name: String,
+    harness: String,
+    model: String,
+    #[serde(default)]
+    effort: Option<Effort>,
+    description: String,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+struct ParsedFile {
+    agents: Vec<Agent>,
+    harnesses: Vec<CustomHarness>,
     fallbacks: BTreeMap<String, String>,
 }
 
@@ -92,8 +130,9 @@ impl Roster {
         let file =
             parse_file(BUILT_IN, "built-in roster").unwrap_or_else(|e| panic!("the built-in roster is invalid: {e}"));
         Roster {
+            harnesses: file.harnesses,
             entries: file
-                .agent
+                .agents
                 .into_iter()
                 .map(|agent| Entry {
                     agent,
@@ -112,7 +151,8 @@ impl Roster {
             Ok(text) => {
                 let origin = user_file.display().to_string();
                 let file = parse_file(&text, &origin)?;
-                for agent in file.agent {
+                roster.harnesses = file.harnesses;
+                for agent in file.agents {
                     roster.put(Entry {
                         agent,
                         source: Source::User,
@@ -166,6 +206,10 @@ impl Roster {
         Ok(())
     }
 
+    pub fn harnesses(&self) -> &[CustomHarness] {
+        &self.harnesses
+    }
+
     pub fn get(&self, name: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.agent.name == name)
     }
@@ -179,41 +223,82 @@ impl Roster {
     }
 }
 
-fn parse_file(text: &str, origin: &str) -> Result<RosterFile, RosterError> {
+fn parse_file(text: &str, origin: &str) -> Result<ParsedFile, RosterError> {
     let file: RosterFile = toml::from_str(text).map_err(|e| RosterError::Parse {
         origin: origin.to_string(),
         message: e.to_string(),
     })?;
-    let invalid = |agent: &Agent, problem: String| RosterError::Invalid {
-        origin: origin.to_string(),
-        agent: agent.name.clone(),
-        problem,
-    };
     let mut seen = HashSet::new();
-    for agent in &file.agent {
-        if !is_valid_name(&agent.name) {
-            return Err(invalid(
-                agent,
-                "needs a name of lowercase letters, digits and hyphens".into(),
-            ));
+    for harness in &file.harness {
+        let invalid = |problem: String| RosterError::InvalidHarness {
+            origin: origin.to_string(),
+            harness: harness.name.clone(),
+            problem,
+        };
+        if !is_valid_name(&harness.name) {
+            return Err(invalid("needs a name of lowercase letters, digits and hyphens".into()));
         }
-        if agent.name == FORWARD {
-            return Err(invalid(
-                agent,
-                format!("can't be called `{FORWARD}`, the generic forwarder's name"),
-            ));
+        if BUILT_IN_NAMES.contains(&harness.name.as_str()) {
+            return Err(invalid("has a built-in harness's name".into()));
         }
-        if !seen.insert(agent.name.as_str()) {
-            return Err(invalid(agent, "is defined twice".into()));
+        if !seen.insert(harness.name.as_str()) {
+            return Err(invalid("is defined twice".into()));
         }
-        if let Some(effort) = agent.effort.filter(|e| !agent.harness.supports(*e)) {
-            return Err(invalid(agent, unsupported_effort(agent.harness, effort)));
-        }
+        harness.check().map_err(invalid)?;
     }
-    Ok(file)
+    let mut seen = HashSet::new();
+    let mut agents = Vec::new();
+    for raw in file.agent {
+        let invalid = |problem: String| RosterError::Invalid {
+            origin: origin.to_string(),
+            agent: raw.name.clone(),
+            problem,
+        };
+        if !is_valid_name(&raw.name) {
+            return Err(invalid("needs a name of lowercase letters, digits and hyphens".into()));
+        }
+        if raw.name == FORWARD {
+            return Err(invalid(format!(
+                "can't be called `{FORWARD}`, the generic forwarder's name"
+            )));
+        }
+        if !seen.insert(raw.name.clone()) {
+            return Err(invalid("is defined twice".into()));
+        }
+        let harness = Harness::built_in(&raw.harness)
+            .or_else(|| {
+                file.harness
+                    .iter()
+                    .find(|h| h.name == raw.harness)
+                    .map(|h| Harness::Custom(Box::new(h.clone())))
+            })
+            .ok_or_else(|| {
+                invalid(format!(
+                    "runs in `{}`, which isn't a harness brigade knows",
+                    raw.harness
+                ))
+            })?;
+        if let Some(effort) = raw.effort.filter(|e| !harness.supports(*e)) {
+            return Err(invalid(unsupported_effort(&harness, effort)));
+        }
+        agents.push(Agent {
+            name: raw.name,
+            harness,
+            model: raw.model,
+            effort: raw.effort,
+            description: raw.description,
+            env: raw.env,
+            args: raw.args,
+        });
+    }
+    Ok(ParsedFile {
+        agents,
+        harnesses: file.harness,
+        fallbacks: file.fallbacks,
+    })
 }
 
-pub fn unsupported_effort(harness: Harness, effort: Effort) -> String {
+pub fn unsupported_effort(harness: &Harness, effort: Effort) -> String {
     let levels: Vec<&str> = harness.efforts().iter().map(|e| e.as_str()).collect();
     format!("has effort `{effort}`, but {harness} takes {}", levels.join(", "))
 }

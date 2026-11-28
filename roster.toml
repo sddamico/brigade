@@ -7,7 +7,8 @@
 #           own default effort applies
 # env/args: extra environment and CLI arguments; values expand $VAR and ${VAR}
 #
-# A user roster can also have a [fallbacks] table, `sol = "opus"`, naming the
+# A user roster can also declare harnesses of its own in [[harness]] tables
+# (see the README), and have a [fallbacks] table, `sol = "opus"`, naming the
 # agent a run switches to when its agent hits a usage limit. The built-in roster
 # has none, since which accounts a user has is theirs to say.
 

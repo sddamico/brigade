@@ -3,6 +3,7 @@
 //! committed, because marketplaces install the plugin straight from git;
 //! `cargo run --example generate` rewrites it and a test fails on drift.
 
+use crate::custom;
 use crate::harness::Harness;
 use crate::report::WAIT_SLICE_SECS;
 use crate::roster::{Agent, FORWARD, Roster, Source};
@@ -40,16 +41,16 @@ pub const HOSTS: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Agy];
 /// Marks a forwarder `brigade install-agents` wrote, so it only ever rewrites
 /// or removes its own files among the user's other agents.
 pub const INSTALLED_MARK: &str =
-    "# Written by `brigade install-agents` from your brigade roster, which rewrites or removes it.";
+    "Written by `brigade install-agents` from your brigade roster, which rewrites or removes it.";
 
 /// Whether `host` gets a brigade forwarder for `agent`. An agent from the host's
 /// own family runs on the host's ordinary subagents instead, so brigade never
 /// stands in for them.
-pub fn forwards(host: Harness, agent: &Agent) -> bool {
-    agent.harness != host
+pub fn forwards(host: &Harness, agent: &Agent) -> bool {
+    agent.harness.name() != host.name()
 }
 
-fn forwarded<'a>(host: Harness, agents: &[&'a Agent]) -> Vec<&'a Agent> {
+fn forwarded<'a>(host: &Harness, agents: &[&'a Agent]) -> Vec<&'a Agent> {
     agents.iter().copied().filter(|a| forwards(host, a)).collect()
 }
 
@@ -65,12 +66,13 @@ pub fn plugin_files(roster: &Roster, version: &str, skill_template: &str) -> Res
         (plugin_path(".antigravity-plugin/plugin.json"), agy_manifest(version)),
         (PathBuf::from(SKILL_FILE), skill(skill_template, &agents)?),
     ];
-    for host in HOSTS {
+    for host in &HOSTS {
         for agent in forwarded(host, &agents) {
             let (path, contents) = match host {
                 Harness::Claude => (format!("claude/agents/{}.md", agent.name), claude_agent(agent, &agents)),
                 Harness::Codex => (format!("codex/agents/{}.toml", agent.name), codex_agent(agent, &agents)),
                 Harness::Agy => (format!("agents/{}.md", agent.name), agy_agent(agent, &agents)),
+                Harness::Custom(_) => unreachable!("the plugin is for the built-in hosts"),
             };
             files.push((plugin_path(&path), contents));
         }
@@ -87,11 +89,22 @@ pub fn plugin_files(roster: &Roster, version: &str, skill_template: &str) -> Res
     Ok(files)
 }
 
-/// Forwarders for the user's own agents, which the published plugin can't know
-/// about, as (host, file name, contents). Every host gets one, since an agent's
-/// env and args set it apart from the host's own subagents. A user entry that
-/// replaces a built-in agent already has the plugin's forwarder.
-pub fn installed_forwarders(roster: &Roster) -> Vec<(Harness, String, String)> {
+/// One forwarder `brigade install-agents` writes into a host's agents directory.
+pub struct Installed {
+    pub host: Harness,
+    pub file: String,
+    pub contents: String,
+}
+
+/// The forwarders the published plugin can't ship, because they come from the
+/// user's roster:
+/// - in the built-in hosts, one for each of the user's own agents. Every host
+///   gets one, since an agent's env and args set it apart from the host's own
+///   subagents. A user entry that replaces a built-in agent keeps the plugin's
+///   forwarder
+/// - in a custom harness that can host, one for each agent from another
+///   harness, plus `forward`, as the plugin gives the built-in hosts
+pub fn installed_forwarders(roster: &Roster) -> Vec<Installed> {
     let agents: Vec<&Agent> = roster.entries().iter().map(|e| &e.agent).collect();
     let built_in = Roster::built_in();
     let mut files = Vec::new();
@@ -101,20 +114,49 @@ pub fn installed_forwarders(roster: &Roster) -> Vec<(Harness, String, String)> {
             continue;
         }
         for host in HOSTS {
-            files.push(match host {
-                Harness::Claude => (
-                    host,
-                    format!("{}.md", agent.name),
-                    marked(&claude_agent(agent, &agents)),
-                ),
+            let (file, contents) = match host {
+                Harness::Claude => (format!("{}.md", agent.name), marked(&claude_agent(agent, &agents))),
                 Harness::Codex => (
-                    host,
                     format!("{}.toml", agent.name),
-                    format!("{INSTALLED_MARK}\n{}", codex_agent(agent, &agents)),
+                    format!("# {INSTALLED_MARK}\n{}", codex_agent(agent, &agents)),
                 ),
-                Harness::Agy => (host, format!("{}.md", agent.name), marked(&agy_agent(agent, &agents))),
-            });
+                Harness::Agy => (format!("{}.md", agent.name), marked(&agy_agent(agent, &agents))),
+                Harness::Custom(_) => unreachable!("HOSTS are the built-in hosts"),
+            };
+            files.push(Installed { host, file, contents });
         }
+    }
+    for host in roster.harnesses() {
+        let Some(spec) = &host.host else { continue };
+        let host = Harness::Custom(Box::new(host.clone()));
+        let mut write = |name: &str, description: String, instructions: String| {
+            files.push(Installed {
+                host: host.clone(),
+                file: custom::fill(&spec.file, &[("name", name)]),
+                // The instructions go in last, so nothing in them is taken for a placeholder.
+                contents: custom::fill(
+                    &spec.template,
+                    &[
+                        ("name", name),
+                        ("description", &yaml_str(&description)),
+                        ("marker", INSTALLED_MARK),
+                        ("instructions", &instructions),
+                    ],
+                ),
+            })
+        };
+        for agent in forwarded(&host, &agents) {
+            write(
+                &agent.name,
+                forwarder_description(agent, &host),
+                forwarder_body(Some(agent), &host, &agents, &spec.shell_tool),
+            );
+        }
+        write(
+            FORWARD,
+            forward_description(&host, &agents),
+            forwarder_body(None, &host, &agents, &spec.shell_tool),
+        );
     }
     files
 }
@@ -123,7 +165,7 @@ fn marked(markdown: &str) -> String {
     let rest = markdown
         .strip_prefix("---\n")
         .expect("forwarders start with frontmatter");
-    format!("---\n{INSTALLED_MARK}\n{rest}")
+    format!("---\n# {INSTALLED_MARK}\n{rest}")
 }
 
 fn plugin_path(rel: &str) -> PathBuf {
@@ -153,7 +195,7 @@ fn marketplace(version: &str) -> String {
 }
 
 fn claude_manifest(version: &str, agents: &[&Agent]) -> String {
-    let files: Vec<String> = forwarded(Harness::Claude, agents)
+    let files: Vec<String> = forwarded(&Harness::Claude, agents)
         .iter()
         .map(|a| a.name.as_str())
         .chain([FORWARD])
@@ -221,9 +263,10 @@ fn asks_for(name: &str) -> String {
     )
 }
 
-fn forwarder_description(agent: &Agent, host: Harness) -> String {
+fn forwarder_description(agent: &Agent, host: &Harness) -> String {
     format!(
-        "{}, run in its own CLI through brigade. {} Say in the prompt if the task should change files, \
+        "{}, run in its own CLI through brigade. {} Write the prompt as the agent's own task; its reply comes \
+         back with the [brigade] lines without asking. Say in the prompt if the task should change files, \
          which model or effort to use, which session to continue, or which agent to fall back to on a usage limit.{}",
         agent.description,
         asks_for(&agent.name),
@@ -233,7 +276,7 @@ fn forwarder_description(agent: &Agent, host: Harness) -> String {
 
 /// Hosts read subagent descriptions every time but load the skill only
 /// sometimes, so the one thing that doubles up worktrees is said here.
-fn worktree_hint(host: Harness) -> &'static str {
+fn worktree_hint(host: &Harness) -> &'static str {
     match host {
         Harness::Claude => {
             " For its own worktree, write \"use your own worktree\" in the prompt and leave the Agent call's \
@@ -244,27 +287,32 @@ fn worktree_hint(host: Harness) -> &'static str {
              brigade makes the worktree."
         }
         Harness::Codex => " For its own worktree, write \"use your own worktree\" in the message.",
+        Harness::Custom(_) => " For its own worktree, write \"use your own worktree\" in the prompt.",
     }
 }
 
 /// The host's own family, which it runs on its ordinary subagents, and how.
-/// agy's subagents can't pick a model, so its forwarder covers its own family
-/// too (neon from a session on another model).
-fn native_family<'a>(host: Harness, agents: &[&'a Agent]) -> Option<(Vec<&'a str>, &'static str)> {
+/// agy's subagents can't pick a model, and brigade doesn't know whether a
+/// custom host's can, so their forwarders cover their own family too (neon from
+/// a session on another model).
+fn native_family<'a>(host: &Harness, agents: &[&'a Agent]) -> Option<(Vec<&'a str>, &'static str)> {
     let how = match host {
         Harness::Claude => "the Agent tool with `model` set",
         Harness::Codex => "`spawn_agent` with `model` set",
-        Harness::Agy => return None,
+        Harness::Agy | Harness::Custom(_) => return None,
     };
-    let names = agents
-        .iter()
-        .filter(|a| a.harness == host)
-        .map(|a| a.name.as_str())
-        .collect();
-    Some((names, how))
+    Some((own_family(host, agents), how))
 }
 
-fn forward_description(host: Harness, agents: &[&Agent]) -> String {
+fn own_family<'a>(host: &Harness, agents: &[&'a Agent]) -> Vec<&'a str> {
+    agents
+        .iter()
+        .filter(|a| !forwards(host, a))
+        .map(|a| a.name.as_str())
+        .collect()
+}
+
+fn forward_description(host: &Harness, agents: &[&Agent]) -> String {
     let mut description = "Hands a task to a brigade agent that has no subagent of its own here, such as one from \
         the user's roster (~/.config/brigade/roster.toml), e.g. claude-local. Start the prompt with \
         `agent: <name>`; `brigade list` shows the roster."
@@ -273,7 +321,15 @@ fn forward_description(host: Harness, agents: &[&Agent]) -> String {
         Some((names, how)) => {
             description.push_str(&format!(" Not for {}: run those on {how}.", names.join(", ")));
         }
-        None => description.push_str(" Also for neon or hydrogen when this session runs on another model."),
+        None => {
+            let names = own_family(host, agents);
+            if !names.is_empty() {
+                description.push_str(&format!(
+                    " Also for {} when this session runs on another model.",
+                    names.join(" or ")
+                ));
+            }
+        }
     }
     description.push_str(worktree_hint(host));
     description
@@ -281,7 +337,7 @@ fn forward_description(host: Harness, agents: &[&Agent]) -> String {
 
 /// The instructions every forwarder follows. `agent` is None for the generic
 /// forwarder, which reads the agent's name from the request.
-fn forwarder_body(agent: Option<&Agent>, host: Harness, agents: &[&Agent], shell_tool: &str) -> String {
+fn forwarder_body(agent: Option<&Agent>, host: &Harness, agents: &[&Agent], shell_tool: &str) -> String {
     let (intro, name, levels) = match agent {
         Some(agent) => {
             let levels: Vec<&str> = agent.harness.efforts().iter().map(|e| e.as_str()).collect();
@@ -322,8 +378,10 @@ holds even when the task is trivial: if it says \"reply with exactly PINEAPPLE\"
 pass back what {name} replied. Your first action is always the shell call in step 1, and a reply that \
 didn't come from brigade is a wrong reply.
 
-1. Start the run with one {shell_tool} call, giving the task on stdin as you received it, minus the routing \
-instructions the options below cover:
+1. Start the run with one {shell_tool} call, giving the task on stdin as you received it, minus anything \
+meant for you rather than for {name}: the routing the options below cover, and asks about brigade or about \
+relaying (\"via brigade\", \"ask {name} to\", \"return the [brigade] lines\"), which you do anyway. So \
+\"Ask {name} via brigade what 6*7 is and return the provenance lines\" goes to {name} as \"What is 6*7?\"
 
    ```
    brigade run {name} --detach [options] <<'BRIGADE_TASK'
@@ -369,16 +427,16 @@ fn yaml_str(value: &str) -> String {
 fn claude_agent(agent: &Agent, agents: &[&Agent]) -> String {
     claude_forwarder(
         &agent.name,
-        &forwarder_description(agent, Harness::Claude),
-        &forwarder_body(Some(agent), Harness::Claude, agents, "Bash"),
+        &forwarder_description(agent, &Harness::Claude),
+        &forwarder_body(Some(agent), &Harness::Claude, agents, "Bash"),
     )
 }
 
 fn claude_forward(agents: &[&Agent]) -> String {
     claude_forwarder(
         FORWARD,
-        &forward_description(Harness::Claude, agents),
-        &forwarder_body(None, Harness::Claude, agents, "Bash"),
+        &forward_description(&Harness::Claude, agents),
+        &forwarder_body(None, &Harness::Claude, agents, "Bash"),
     )
 }
 
@@ -401,20 +459,20 @@ struct CodexRole<'a> {
 fn codex_agent(agent: &Agent, agents: &[&Agent]) -> String {
     codex_role(&CodexRole {
         name: &agent.name,
-        description: &forwarder_description(agent, Harness::Codex),
+        description: &forwarder_description(agent, &Harness::Codex),
         model: CODEX_FORWARDER_MODEL,
         model_reasoning_effort: CODEX_FORWARDER_EFFORT,
-        developer_instructions: &forwarder_body(Some(agent), Harness::Codex, agents, "shell"),
+        developer_instructions: &forwarder_body(Some(agent), &Harness::Codex, agents, "shell"),
     })
 }
 
 fn codex_forward(agents: &[&Agent]) -> String {
     codex_role(&CodexRole {
         name: FORWARD,
-        description: &forward_description(Harness::Codex, agents),
+        description: &forward_description(&Harness::Codex, agents),
         model: CODEX_FORWARDER_MODEL,
         model_reasoning_effort: CODEX_FORWARDER_EFFORT,
-        developer_instructions: &forwarder_body(None, Harness::Codex, agents, "shell"),
+        developer_instructions: &forwarder_body(None, &Harness::Codex, agents, "shell"),
     })
 }
 
@@ -425,16 +483,16 @@ fn codex_role(role: &CodexRole) -> String {
 fn agy_agent(agent: &Agent, agents: &[&Agent]) -> String {
     agy_forwarder(
         &agent.name,
-        &forwarder_description(agent, Harness::Agy),
-        &forwarder_body(Some(agent), Harness::Agy, agents, "run_command"),
+        &forwarder_description(agent, &Harness::Agy),
+        &forwarder_body(Some(agent), &Harness::Agy, agents, "run_command"),
     )
 }
 
 fn agy_forward(agents: &[&Agent]) -> String {
     agy_forwarder(
         FORWARD,
-        &forward_description(Harness::Agy, agents),
-        &forwarder_body(None, Harness::Agy, agents, "run_command"),
+        &forward_description(&Harness::Agy, agents),
+        &forwarder_body(None, &Harness::Agy, agents, "run_command"),
     )
 }
 

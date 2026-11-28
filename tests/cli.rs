@@ -36,6 +36,7 @@ case " $FAKE_LIMIT " in *" $name "*)
     agy)
       printf '%s\n' '{"conversation_id":"agy-conversation","status":"ERROR","response":"","error":"Your AI credits balance is too low to continue.","finished_reason":"error"}'
       printf '%s\n' 'AGY_ERROR: {"status":"RESOURCE_EXHAUSTED","error_code":429,"retryable":false}' >&2 ;;
+    muse-code) printf '%s\n' '{"error":"you hit your usage limit until 5pm"}' ;;
   esac
   exit 1 ;;
 esac
@@ -48,6 +49,7 @@ case "$name" in
     echo '{"type":"thread.started","thread_id":"codex-thread"}'
     echo '{"type":"turn.completed","usage":{}}' ;;
   agy) printf '%s\n' '{"conversation_id":"agy-conversation","status":"SUCCESS","response":"agy reply\n"}' ;;
+  muse-code) printf '%s\n' '{"result":"muse reply\n","session_id":"muse-session"}' ;;
 esac
 "#;
 
@@ -66,7 +68,7 @@ impl Sandbox {
         let fake = bin.join("fake-cli");
         fs::write(&fake, FAKE_CLI).unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-        for name in ["claude", "codex", "agy"] {
+        for name in ["claude", "codex", "agy", "muse-code"] {
             std::os::unix::fs::symlink(&fake, bin.join(name)).unwrap();
         }
         fs::create_dir_all(root.join("work")).unwrap();
@@ -898,4 +900,140 @@ description = "pinned to the previous Sol"
     let kept = sandbox.brigade(&["install-agents"]);
     assert!(stderr(&kept).contains("brigade didn't write it"), "{}", stderr(&kept));
     assert_eq!(fs::read_to_string(home.join(files[0])).unwrap(), "someone else's");
+}
+
+const MUSE_ROSTER: &str = r#"
+[[harness]]
+name = "muse"
+product = "Muse Code"
+program = "muse-code"
+args = ["exec", "--json", "--model", "{model}"]
+efforts = ["low", "high"]
+effort_args = ["--effort", "{effort}"]
+read_only_args = ["--read-only"]
+write_args = ["--yolo"]
+resume_args = ["--resume", "{session}"]
+
+[harness.output]
+format = "json"
+reply = "/result"
+session = "/session_id"
+error = "/error"
+limit_signs = ["usage limit"]
+
+[harness.host]
+agents_dir = "~/.muse/agents"
+file = "{name}.md"
+template = """
+---
+# {marker}
+name: {name}
+description: {description}
+---
+
+{instructions}
+"""
+
+[[agent]]
+name = "muse"
+harness = "muse"
+model = "muse-2"
+description = "Muse Code's own model"
+"#;
+
+#[test]
+fn a_custom_harness_runs_agents_from_its_roster_declaration() {
+    let sandbox = Sandbox::new();
+    sandbox.user_roster(MUSE_ROSTER);
+
+    let output = sandbox.brigade(&["run", "muse", "--effort", "high", "go"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.starts_with("muse reply\n\n[brigade] muse ran in muse"), "{out}");
+    assert!(
+        out.contains("continue it with: brigade run muse --resume muse-session"),
+        "{out}"
+    );
+    assert_eq!(
+        sandbox.args("muse-code"),
+        ["exec", "--json", "--model", "muse-2", "--effort", "high", "--read-only"]
+    );
+    assert!(
+        sandbox
+            .call("muse-code", "stdin")
+            .starts_with("This is a read-only run")
+    );
+
+    let resumed = sandbox.brigade(&["run", "muse", "--write", "--resume", "muse-session", "again"]);
+    assert!(resumed.status.success(), "{}", stderr(&resumed));
+    assert_eq!(
+        sandbox.args("muse-code"),
+        [
+            "exec",
+            "--json",
+            "--model",
+            "muse-2",
+            "--yolo",
+            "--resume",
+            "muse-session"
+        ]
+    );
+
+    let effort = sandbox.brigade(&["run", "muse", "--effort", "ultra", "go"]);
+    assert!(
+        stderr(&effort).contains("muse runs in muse, which takes effort low, high"),
+        "{}",
+        stderr(&effort)
+    );
+
+    let limited = sandbox
+        .command(&["run", "muse", "go"])
+        .env("FAKE_LIMIT", "muse-code")
+        .output()
+        .unwrap();
+    assert_eq!(limited.status.code(), Some(4));
+    assert!(
+        stderr(&limited).contains("[brigade] muse hit a usage limit in Muse Code: you hit your usage limit until 5pm"),
+        "{}",
+        stderr(&limited)
+    );
+}
+
+#[test]
+fn a_custom_harness_with_a_host_section_gets_forwarders_for_every_other_agent() {
+    let sandbox = Sandbox::new();
+    sandbox.user_roster(MUSE_ROSTER);
+    let installed = sandbox.brigade(&["install-agents"]);
+    assert!(installed.status.success(), "{}", stderr(&installed));
+
+    let dir = sandbox.root().join(".muse/agents");
+    let sol = fs::read_to_string(dir.join("sol.md")).unwrap();
+    assert!(sol.starts_with("---\n# Written by `brigade install-agents`"), "{sol}");
+    assert!(
+        sol.contains("\nname: sol\ndescription: \"GPT-6.2 Sol in Codex"),
+        "{sol}"
+    );
+    assert!(sol.contains("brigade run sol"), "{sol}");
+    for name in ["opus", "fable", "sonnet", "astra", "neon", "hydrogen", "forward"] {
+        assert!(dir.join(format!("{name}.md")).exists(), "{name}");
+    }
+    assert!(!dir.join("muse.md").exists(), "a host runs its own agents itself");
+    let forward = fs::read_to_string(dir.join("forward.md")).unwrap();
+    assert!(
+        forward.contains("Also for muse when this session runs on another model"),
+        "{forward}"
+    );
+    assert!(
+        sandbox.root().join(".claude/agents/muse.md").exists(),
+        "the built-in hosts get muse"
+    );
+
+    let bad = MUSE_ROSTER.replace("\"{model}\"]", "\"{modle}\"]");
+    sandbox.user_roster(&bad);
+    let rejected = sandbox.brigade(&["list"]);
+    assert!(
+        stderr(&rejected).contains("harness `muse` has `{modle}` in args, which takes `{model}`, `{prompt}`, `{cwd}`"),
+        "{}",
+        stderr(&rejected)
+    );
 }

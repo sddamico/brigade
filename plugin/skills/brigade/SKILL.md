@@ -23,6 +23,8 @@ A brigade agent is a named worker that runs in one harness's CLI on one model. Y
 
 The agent knows only what you put in the task. Write it for a colleague who hasn't seen this conversation: the goal, the files and commands that matter, what you've already ruled out, and what you want back.
 
+Write the task for the agent itself, not for the forwarder that carries it: no "via brigade", "ask sol to" or "return the [brigade] lines". The forwarder hands the task over as written and returns the `[brigade]` lines anyway, and an agent asked to run brigade starts a second run of itself.
+
 Runs are read-only unless the task has to change files. Ask for a write run only then. Name a model or effort only when the user did: without one an agent runs on its roster model, at the harness's default effort.
 
 ## Starting one, by harness

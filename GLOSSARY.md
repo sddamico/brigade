@@ -4,9 +4,11 @@
 
 **Agent**: one roster entry: a name, the harness it runs in and its model, and optionally an effort and extra environment and CLI arguments for that harness. With no effort in the roster or on the call, the harness's own default effort applies.
 
-**Harness**: a CLI an agent runs in: Claude Code (`claude`), Codex (`codex`) or Antigravity (`agy`).
+**Harness**: a CLI an agent runs in: Claude Code (`claude`), Codex (`codex`) or Antigravity (`agy`), or a custom harness.
 
-**Host**: the harness the orchestrating agent is working in when it tags an agent in.
+**Custom harness**: a harness the user declares in a `[[harness]]` table of their roster: its command line as templates, and where its output keeps the reply, session and errors. Agents run in it like a built-in one. A `[harness.host]` section, with an agents directory and a forwarder template, lets it host brigade agents too.
+
+**Host**: the harness the orchestrating agent is working in when it tags an agent in: one of the built-in harnesses, or a custom harness with a host section.
 
 **Native subagent**: the host's ordinary subagent, used for an agent from the host's own family (opus in Claude Code, sol in Codex, neon in agy). brigade ships no definition for these and isn't involved.
 

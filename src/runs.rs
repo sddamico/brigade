@@ -436,7 +436,13 @@ fn run_harness(
     let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
     let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
     let last_message = fs::read_to_string(&last_message_file).ok();
-    match invocation::parse(record.agent.harness, &stdout, &stderr, last_message.as_deref()) {
+    match invocation::parse(
+        &record.agent.harness,
+        &stdout,
+        &stderr,
+        last_message.as_deref(),
+        status.success(),
+    ) {
         Ok(reply) => Outcome::Done {
             session: reply.session,
             message: reply.message,

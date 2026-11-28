@@ -1,6 +1,7 @@
 //! How a run becomes a command line for its harness's CLI, and how that CLI's
 //! output becomes a reply.
 
+use crate::custom::{self, Parsed};
 use crate::harness::{Access, Effort, Harness};
 use crate::roster::Agent;
 use crate::worktree::Worktree;
@@ -71,7 +72,23 @@ pub fn build(req: &Request, var: &dyn Fn(&str) -> Option<String>) -> Result<Invo
     let mut args = Vec::new();
     let mut stdin = String::new();
     let effort = req.effort.map(|e| e.as_str());
-    match agent.harness {
+    match &agent.harness {
+        Harness::Custom(custom) => {
+            let cwd = req.cwd.to_string_lossy();
+            let call = custom::Args {
+                model: &model,
+                effort: req.effort,
+                access: req.access,
+                resume: req.resume,
+                cwd: &cwd,
+            };
+            let (line, prompt_in_args) = custom.args(&call, &prompt);
+            args.extend(line);
+            args.extend(extra);
+            if !prompt_in_args {
+                stdin = prompt;
+            }
+        }
         Harness::Claude => {
             args.extend(strings(&["-p", "--model", &model]));
             if let Some(effort) = effort {
@@ -169,8 +186,20 @@ fn worktree_note(worktree: &Worktree) -> String {
 
 /// Reads the harness's final output. `last_message` is the file Codex wrote its
 /// final message to, when it wrote one.
-pub fn parse(harness: Harness, stdout: &str, stderr: &str, last_message: Option<&str>) -> Result<Reply, ParseFailure> {
+pub fn parse(
+    harness: &Harness,
+    stdout: &str,
+    stderr: &str,
+    last_message: Option<&str>,
+    succeeded: bool,
+) -> Result<Reply, ParseFailure> {
     match harness {
+        Harness::Custom(custom) => match custom::parse(custom, stdout, stderr, succeeded) {
+            Parsed::Reply { session, message } => Ok(Reply { session, message }),
+            Parsed::Limited(error) => Err(ParseFailure::Limited(error)),
+            Parsed::Failed(error) => Err(ParseFailure::Reported(error)),
+            Parsed::NoResult(error) => Err(ParseFailure::NoResult(error)),
+        },
         Harness::Claude => {
             let v: Value = serde_json::from_str(stdout.trim())
                 .map_err(|_| ParseFailure::NoResult("Claude Code didn't print a JSON result".to_string()))?;
@@ -444,7 +473,7 @@ mod tests {
     fn parses_claude_success_and_error() {
         let ok = r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s-1"}"#;
         assert_eq!(
-            parse(Harness::Claude, ok, "", None),
+            parse(&Harness::Claude, ok, "", None, true),
             Ok(Reply {
                 session: Some("s-1".into()),
                 message: "done".into()
@@ -452,7 +481,7 @@ mod tests {
         );
         let err = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"s-1"}"#;
         assert_eq!(
-            parse(Harness::Claude, err, "", None),
+            parse(&Harness::Claude, err, "", None, true),
             Err(ParseFailure::Reported("Claude Code ended with error_max_turns".into()))
         );
     }
@@ -468,13 +497,16 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(
-            parse(Harness::Codex, &out, "", Some("from file\n")),
+            parse(&Harness::Codex, &out, "", Some("from file\n"), true),
             Ok(Reply {
                 session: Some("t-1".into()),
                 message: "from file".into()
             })
         );
-        assert_eq!(parse(Harness::Codex, &out, "", None).unwrap().message, "from stream");
+        assert_eq!(
+            parse(&Harness::Codex, &out, "", None, true).unwrap().message,
+            "from stream"
+        );
     }
 
     #[test]
@@ -485,7 +517,7 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(
-            parse(Harness::Codex, &out, "", None),
+            parse(&Harness::Codex, &out, "", None, true),
             Err(ParseFailure::Reported("model not found".into()))
         );
     }
@@ -494,7 +526,7 @@ mod tests {
     fn parses_agy_success_and_error() {
         let ok = r#"{"conversation_id":"c-1","status":"SUCCESS","response":"pong\n","num_turns":1}"#;
         assert_eq!(
-            parse(Harness::Agy, ok, "", None),
+            parse(&Harness::Agy, ok, "", None, true),
             Ok(Reply {
                 session: Some("c-1".into()),
                 message: "pong".into()
@@ -503,7 +535,7 @@ mod tests {
         let err =
             r#"{"conversation_id":"c-1","status":"ERROR","error":"model not available","finished_reason":"error"}"#;
         assert_eq!(
-            parse(Harness::Agy, err, "", None),
+            parse(&Harness::Agy, err, "", None, true),
             Err(ParseFailure::Reported("model not available".into()))
         );
     }
@@ -511,7 +543,7 @@ mod tests {
     #[test]
     fn without_an_effort_no_harness_gets_an_effort_flag() {
         for harness in [Harness::Claude, Harness::Codex, Harness::Agy] {
-            let a = agent(harness, "m");
+            let a = agent(harness.clone(), "m");
             let req = Request {
                 agent: &a,
                 model: "override-model",
@@ -540,7 +572,7 @@ mod tests {
     fn usage_limits_are_told_apart_from_other_failures() {
         let claude = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"api_error":"rate_limit","result":"You've hit your session limit · resets 1am (America/New_York)","session_id":"s-1"}"#;
         assert_eq!(
-            parse(Harness::Claude, claude, "", None),
+            parse(&Harness::Claude, claude, "", None, true),
             Err(ParseFailure::Limited(
                 "You've hit your session limit · resets 1am (America/New_York)".into()
             ))
@@ -553,24 +585,25 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(
-            parse(Harness::Codex, &codex, "", None),
+            parse(&Harness::Codex, &codex, "", None, true),
             Err(ParseFailure::Limited(codex_limit.into()))
         );
 
         let agy = r#"{"conversation_id":"c-1","status":"ERROR","response":"","error":"Your AI credits balance is too low to continue.","finished_reason":"error"}"#;
         let agy_stderr = "error: Your AI credits balance is too low to continue.\nAGY_ERROR: {\"short_error\":\"RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).\",\"status\":\"RESOURCE_EXHAUSTED\",\"error_code\":429,\"code_kind\":\"http\",\"retryable\":false}\n";
         assert_eq!(
-            parse(Harness::Agy, agy, agy_stderr, None),
+            parse(&Harness::Agy, agy, agy_stderr, None, true),
             Err(ParseFailure::Limited(
                 "Your AI credits balance is too low to continue.".into()
             ))
         );
         assert_eq!(
             parse(
-                Harness::Agy,
+                &Harness::Agy,
                 agy,
                 "error: Your AI credits balance is too low to continue.\n",
-                None
+                None,
+                true
             ),
             Err(ParseFailure::Reported(
                 "Your AI credits balance is too low to continue.".into()

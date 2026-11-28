@@ -2,6 +2,7 @@
 //! agents directory, which the published plugin can't do: it doesn't know the
 //! user's roster.
 
+use crate::harness::Harness;
 use crate::render::{self, HOSTS, INSTALLED_MARK};
 use crate::roster::Roster;
 use crate::settings::Settings;
@@ -20,17 +21,28 @@ pub enum Change {
 
 /// Writes a forwarder for every user agent into each harness, rewrites the ones
 /// that changed and removes the ones whose agent is gone.
-pub fn install(roster: &Roster, settings: &Settings) -> Result<Vec<Change>, String> {
+pub fn install(
+    roster: &Roster,
+    settings: &Settings,
+    var: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<Change>, String> {
     let forwarders = render::installed_forwarders(roster);
+    let hosts = HOSTS.into_iter().chain(
+        roster
+            .harnesses()
+            .iter()
+            .filter(|h| h.host.is_some())
+            .map(|h| Harness::Custom(Box::new(h.clone()))),
+    );
     let mut changes = Vec::new();
-    for host in HOSTS {
-        let dir = settings.agents_dir(host);
+    for host in hosts {
+        let dir = settings.agents_dir(&host, var)?;
         let wanted: BTreeMap<&str, &str> = forwarders
             .iter()
-            .filter(|(h, _, _)| *h == host)
-            .map(|(_, file, contents)| (file.as_str(), contents.as_str()))
+            .filter(|f| f.host.name() == host.name())
+            .map(|f| (f.file.as_str(), f.contents.as_str()))
             .collect();
-        for path in installed(dir) {
+        for path in installed(&dir) {
             let file = path.file_name().map(|f| f.to_string_lossy().into_owned());
             if !file.is_some_and(|f| wanted.contains_key(f.as_str())) {
                 fs::remove_file(&path).map_err(|e| format!("can't remove {}: {e}", path.display()))?;
@@ -43,7 +55,7 @@ pub fn install(roster: &Roster, settings: &Settings) -> Result<Vec<Change>, Stri
                 Ok(existing) if existing == contents => {}
                 Ok(existing) if !existing.contains(INSTALLED_MARK) => changes.push(Change::NotOurs(path)),
                 _ => {
-                    fs::create_dir_all(dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
+                    fs::create_dir_all(&dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
                     fs::write(&path, contents).map_err(|e| format!("can't write {}: {e}", path.display()))?;
                     changes.push(Change::Wrote(path));
                 }

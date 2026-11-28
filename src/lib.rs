@@ -1,3 +1,4 @@
+pub mod custom;
 pub mod harness;
 pub mod install;
 pub mod invocation;
