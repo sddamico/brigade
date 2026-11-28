@@ -301,8 +301,8 @@ fn dispatch(command: Command) -> Result<ExitCode, String> {
 fn run(settings: &Settings, args: RunArgs) -> Result<ExitCode, String> {
     if settings.in_codex_sandbox {
         return Err(
-            "can't start a run inside Codex's sandbox, where the agent's CLI can't reach its API and a \
-                    detached run ends with the shell call. Run brigade with `sandbox_permissions: \
+            "can't start a run inside Codex's sandbox, where a run ends with the shell call that started it \
+                    and the agent's CLI may not reach its API. Run brigade with `sandbox_permissions: \
                     \"require_escalated\"`, or outside the sandbox"
                 .into(),
         );
