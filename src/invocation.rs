@@ -3,6 +3,7 @@
 
 use crate::harness::{Access, Effort, Harness};
 use crate::roster::Agent;
+use crate::worktree::Worktree;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,7 @@ pub struct Request<'a> {
     pub task: &'a str,
     /// Where Codex writes its final message (`codex exec -o`).
     pub last_message_file: &'a Path,
+    pub worktree: Option<&'a Worktree>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -59,9 +61,10 @@ pub fn build(req: &Request, var: &dyn Fn(&str) -> Option<String>) -> Result<Invo
         .iter()
         .map(|(k, v)| Ok((k.clone(), expand(v, var)?)))
         .collect::<Result<Vec<_>, UnsetVar>>()?;
-    let prompt = match req.access {
-        Access::ReadOnly => format!("{READ_ONLY_NOTE}{}", req.task),
-        Access::Write => req.task.to_string(),
+    let prompt = match (req.access, req.worktree) {
+        (Access::ReadOnly, _) => format!("{READ_ONLY_NOTE}{}", req.task),
+        (Access::Write, Some(worktree)) => format!("{}{}", worktree_note(worktree), req.task),
+        (Access::Write, None) => req.task.to_string(),
     };
     let read_only = req.access == Access::ReadOnly;
 
@@ -148,6 +151,20 @@ pub enum ParseFailure {
     Reported(String),
     /// The harness left no usable result; its stderr may explain why.
     NoResult(String),
+}
+
+/// Briefs often give paths in the user's checkout, and an agent that follows
+/// them changes the checkout instead of its worktree.
+fn worktree_note(worktree: &Worktree) -> String {
+    format!(
+        "You're working in a git worktree made for this task, at {} on branch {}. {} is the user's own \
+         checkout of the same repo: don't run commands in it or change anything there, even where this task \
+         gives paths in it. Every file is at the same place relative to the repo root here, so use this \
+         worktree's copy.\n\n",
+        worktree.path.display(),
+        worktree.branch,
+        worktree.checkout.display(),
+    )
 }
 
 /// Reads the harness's final output. `last_message` is the file Codex wrote its
@@ -313,6 +330,7 @@ mod tests {
             resume,
             task: "do it",
             last_message_file: Path::new("/runs/r/last-message.txt"),
+            worktree: None,
         };
         build(&req, &|_| None).unwrap()
     }
@@ -397,6 +415,7 @@ mod tests {
             resume: None,
             task: "t",
             last_message_file: Path::new("/x"),
+            worktree: None,
         };
         let vars = |name: &str| match name {
             "LOCAL_MODEL" => Some("local".to_string()),
@@ -499,6 +518,7 @@ mod tests {
                 resume: None,
                 task: "t",
                 last_message_file: Path::new("/x"),
+                worktree: None,
             };
             let inv = build(&req, &|_| None).unwrap();
             assert!(

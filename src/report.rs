@@ -4,7 +4,7 @@
 use crate::harness::{Access, Effort};
 use crate::roster::{Entry, Source};
 use crate::runs::{Outcome, RunRecord, State};
-use crate::worktree::WorktreeState;
+use crate::worktree::{WorktreeReport, WorktreeState};
 use serde_json::json;
 use std::path::Path;
 
@@ -12,7 +12,7 @@ use std::path::Path;
 /// Claude Code's shell calls, which a forwarder may not raise.
 pub const WAIT_SLICE_SECS: u64 = 100;
 
-pub fn done(record: &RunRecord, session: Option<&str>, message: &str, worktree: Option<&WorktreeState>) -> String {
+pub fn done(record: &RunRecord, session: Option<&str>, message: &str, worktree: Option<&WorktreeReport>) -> String {
     let agent = &record.agent;
     let mut out = format!(
         "{message}\n\n{}[brigade] {} ran in {} ({}, {}, {}) as run {}\n",
@@ -46,7 +46,7 @@ pub fn done(record: &RunRecord, session: Option<&str>, message: &str, worktree: 
     out
 }
 
-pub fn failed(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&WorktreeState>) -> String {
+pub fn failed(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&WorktreeReport>) -> String {
     format!(
         "{}[brigade] {} failed: {error}\n{}[brigade] logs: {}\n",
         fell_back(record),
@@ -58,12 +58,12 @@ pub fn failed(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&Wo
 
 /// Hosts often answer without loading the skill, so the advice on what to do
 /// next travels in the reply itself.
-pub fn limited(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&WorktreeState>) -> String {
+pub fn limited(record: &RunRecord, error: &str, logs: &Path, worktree: Option<&WorktreeReport>) -> String {
     let harness = record.agent.harness.product();
     format!(
         "{}[brigade] {} hit a usage limit in {harness}: {error}\n\
-         [brigade] {harness}'s other agents usually share this limit, so don't retry or switch to another agent. \
-         Tell the user when it resets and let them choose what to do\n{}[brigade] logs: {}\n",
+         [brigade] {harness}'s other agents usually share this limit, so don't retry, switch to another agent \
+         or answer in its place. Tell the user when it resets and let them choose what to do\n{}[brigade] logs: {}\n",
         fell_back(record),
         record.agent.name,
         worktree_lines(record, worktree),
@@ -86,7 +86,7 @@ fn fell_back(record: &RunRecord) -> String {
     }
 }
 
-pub fn cancelled(record: &RunRecord, reason: &str, logs: &Path, worktree: Option<&WorktreeState>) -> String {
+pub fn cancelled(record: &RunRecord, reason: &str, logs: &Path, worktree: Option<&WorktreeReport>) -> String {
     format!(
         "{}[brigade] run {} was cancelled: {reason}\n{}[brigade] logs: {}\n",
         fell_back(record),
@@ -98,12 +98,21 @@ pub fn cancelled(record: &RunRecord, reason: &str, logs: &Path, worktree: Option
 
 /// Where a run's changes ended up, so an orchestrator relaying only the text
 /// still knows what to merge or clean up.
-fn worktree_lines(record: &RunRecord, state: Option<&WorktreeState>) -> String {
+fn worktree_lines(record: &RunRecord, report: Option<&WorktreeReport>) -> String {
     let Some(worktree) = &record.worktree else {
         return String::new();
     };
     let (path, branch) = (worktree.path.display(), &worktree.branch);
-    let mut out = match state {
+    let mut out = match report.and_then(|r| r.checkout_changed.as_ref()) {
+        Some(change) => format!(
+            "[brigade] warning: the agent worked in the user's checkout {} instead of only its worktree, and {change}. \
+             Check that checkout before carrying on\n",
+            worktree.checkout.display()
+        ),
+        None => String::new(),
+    };
+    let state = report.map(|r| &r.worktree);
+    out.push_str(&match state {
         Some(WorktreeState::Committed { commit, agent_branch }) => {
             let mut out =
                 format!("[brigade] its changes are committed as {commit} on branch {branch}, in worktree {path}\n");
@@ -126,7 +135,7 @@ fn worktree_lines(record: &RunRecord, state: Option<&WorktreeState>) -> String {
         Some(WorktreeState::Kept) | None => {
             format!("[brigade] its worktree {path} on branch {branch} is still there\n")
         }
-    };
+    });
     if worktree.left_out_uncommitted && state != Some(&WorktreeState::Removed) {
         out.push_str(&format!(
             "[brigade] note: the worktree started from HEAD, so uncommitted changes in {} aren't in it\n",
@@ -176,7 +185,7 @@ pub fn lost(record: &RunRecord, logs: &Path) -> String {
     )
 }
 
-pub fn state_json(record: &RunRecord, state: &State, logs: &Path, worktree: Option<&WorktreeState>) -> String {
+pub fn state_json(record: &RunRecord, state: &State, logs: &Path, worktree: Option<&WorktreeReport>) -> String {
     let mut value = match state {
         State::Finished(Outcome::Done { session, message }) => {
             json!({ "run": record, "status": "done", "session": session, "message": message })
@@ -193,8 +202,11 @@ pub fn state_json(record: &RunRecord, state: &State, logs: &Path, worktree: Opti
         State::Running => json!({ "run": record, "status": "running" }),
         State::Lost => json!({ "run": record, "status": "lost", "logs": logs }),
     };
-    if let Some(worktree) = worktree {
-        value["worktree"] = json!(worktree);
+    if let Some(report) = worktree {
+        value["worktree"] = json!(report.worktree);
+        if let Some(change) = &report.checkout_changed {
+            value["checkout_changed"] = json!(change);
+        }
     }
     serde_json::to_string_pretty(&value).expect("json values serialize") + "\n"
 }

@@ -13,7 +13,7 @@ use crate::invocation::{self, ParseFailure, Request};
 use crate::process::Tree;
 use crate::roster::Agent;
 use crate::settings::{DEPTH_VAR, Settings};
-use crate::worktree::{self, Worktree, WorktreeState};
+use crate::worktree::{self, Worktree, WorktreeReport};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -147,7 +147,7 @@ impl RunDir {
         let _ = fs::remove_dir_all(&self.path);
     }
 
-    pub fn worktree_state(&self) -> Option<WorktreeState> {
+    pub fn worktree_report(&self) -> Option<WorktreeReport> {
         let text = fs::read_to_string(self.file("worktree.json")).ok()?;
         serde_json::from_str(&text).ok()
     }
@@ -312,9 +312,13 @@ pub fn execute(record: RunRecord, dir: &RunDir, lease: Duration, var: &dyn Fn(&s
             Outcome::Done { .. } => worktree::commit(worktree, &commit_message(record, task.as_deref().unwrap_or(""))),
             Outcome::Failed { .. } | Outcome::Limited { .. } | Outcome::Cancelled { .. } => worktree::tidy(worktree),
         };
+        let report = WorktreeReport {
+            worktree: state,
+            checkout_changed: worktree::checkout_change(worktree),
+        };
         let _ = write_atomic(
             &dir.file("worktree.json"),
-            &serde_json::to_vec_pretty(&state).expect("states serialize"),
+            &serde_json::to_vec_pretty(&report).expect("reports serialize"),
         );
     }
     // A `brigade cancel` that gave up on the worker may have recorded the
@@ -344,6 +348,7 @@ fn run_harness(
         resume: record.resume.as_deref(),
         task,
         last_message_file: &last_message_file,
+        worktree: record.worktree.as_ref(),
     };
     let invocation = match invocation::build(&request, var) {
         Ok(invocation) => invocation,

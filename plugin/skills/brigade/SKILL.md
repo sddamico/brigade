@@ -67,6 +67,8 @@ A team is several runs of one agent at once, one task each. Split the work into 
 
 Read-only members can share the checkout. Write members each need their own worktree: `isolation: "worktree"` on Claude Code's Agent tool for Claude's own subagents, `Workspace: "branch"` on agy's `invoke_subagent`, and "use your own worktree" in a forwarder's prompt, which then runs `brigade run --write --worktree`. Codex subagents have no worktree option, so a Codex write team of sol or astra goes through `forward` with "use your own worktree".
 
+In a worktree member's brief, give paths relative to the repo root, not the checkout's absolute path: brigade tells the agent where its worktree is, and an agent handed the checkout's path may work there instead.
+
 A brigade worktree starts from HEAD on a branch `brigade/<run id>`, and brigade commits the run's changes on that branch when it finishes; the reply's `[brigade]` lines name the commit, branch and worktree. Merge or cherry-pick each branch, then remove it with `git worktree remove <path>` and `git branch -d <branch>`. A worktree has none of the checkout's uncommitted changes or gitignored files (`.env`, `node_modules`, build output), so commit what members need first, and expect them to install dependencies. A failed or cancelled run that changed nothing has its worktree and branch removed for it.
 
 Runs nest at most two deep: a brigade agent can start one more level of agents, and those can't start any.

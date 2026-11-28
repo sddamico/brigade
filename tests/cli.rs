@@ -24,6 +24,7 @@ fi
 [ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
 [ -n "$FAKE_WRITE" ] && printf 'changed\n' > "$FAKE_WRITE"
 [ -n "$FAKE_BRANCH" ] && git checkout -qb "$FAKE_BRANCH"
+[ -n "$FAKE_ESCAPE" ] && git -C "$FAKE_ESCAPE" checkout -qb escaped
 [ -n "$FAKE_COMMIT" ] && printf 'mine\n' > "$FAKE_COMMIT" && git add -A && git commit -qm "agent's own commit"
 if [ -n "$FAKE_FAIL" ]; then echo "fake $name: $FAKE_FAIL" >&2; exit 1; fi
 case " $FAKE_LIMIT " in *" $name "*)
@@ -772,6 +773,38 @@ fn an_agent_that_commits_its_own_work_still_counts_as_changing_something() {
         git_in(&work, &["log", "--format=%s", &format!("main..{branch}")]).trim(),
         "agent's own commit"
     );
+}
+
+#[test]
+fn a_worktree_agent_is_told_to_leave_the_checkout_alone_and_caught_when_it_doesnt() {
+    let sandbox = Sandbox::new();
+    let work = sandbox.repo();
+    let output = sandbox
+        .command(&["run", "sol", "--write", "--worktree", "go"])
+        .env("FAKE_ESCAPE", &work)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let brief = sandbox.call("codex", "stdin");
+    assert!(
+        brief.starts_with("You're working in a git worktree made for this task, at "),
+        "{brief}"
+    );
+    assert!(
+        brief.contains(&format!("{} is the user's own checkout", work.display())),
+        "{brief}"
+    );
+    let out = stdout(&output);
+    assert!(
+        out.contains(&format!(
+            "[brigade] warning: the agent worked in the user's checkout {} instead of only its worktree, and it's on branch escaped now, not branch main",
+            work.display()
+        )),
+        "{out}"
+    );
+
+    let clean = sandbox.brigade(&["run", "sol", "--write", "--worktree", "go"]);
+    assert!(!stdout(&clean).contains("warning"), "{}", stdout(&clean));
 }
 
 #[test]

@@ -22,6 +22,21 @@ pub struct Worktree {
     /// run's to remove.
     #[serde(default)]
     pub reused: bool,
+    /// The user's checkout the worktree stands in for, which the agent must
+    /// leave alone, and its HEAD and branch when the run started.
+    pub checkout: PathBuf,
+    pub checkout_head: String,
+    /// Empty for a detached HEAD.
+    pub checkout_branch: String,
+}
+
+/// What a run did to its worktree, and to the user's checkout.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorktreeReport {
+    pub worktree: WorktreeState,
+    /// How the checkout changed during the run, which it never should.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_changed: Option<String>,
 }
 
 /// What became of a run's worktree once the run ended.
@@ -69,7 +84,14 @@ pub fn create(settings: &Settings, cwd: &Path, run_id: &str) -> Result<(Worktree
     let path_arg = path.to_string_lossy();
     git(&root, &["worktree", "add", "--quiet", "-b", &branch, &path_arg, "HEAD"])?;
     let base = git(&path, &["rev-parse", "HEAD"])?.trim().to_string();
-    let run_cwd = path.join(prefix);
+    // `git rev-parse --show-prefix` is empty at the repo root, and joining it
+    // would leave a trailing slash in the paths brigade prints.
+    let run_cwd = if prefix.is_empty() {
+        path.clone()
+    } else {
+        path.join(prefix)
+    };
+    let (checkout_head, checkout_branch) = position(&root)?;
     let worktree = Worktree {
         path,
         branch,
@@ -77,6 +99,9 @@ pub fn create(settings: &Settings, cwd: &Path, run_id: &str) -> Result<(Worktree
         base,
         left_out_uncommitted,
         reused: false,
+        checkout: root,
+        checkout_head,
+        checkout_branch,
     };
     Ok((worktree, run_cwd))
 }
@@ -95,14 +120,52 @@ pub fn existing(settings: &Settings, cwd: &Path) -> Option<Worktree> {
     if !branch.starts_with("brigade/") {
         return None;
     }
+    let repo = main_checkout(&path).ok()?;
+    let (checkout_head, checkout_branch) = position(&repo).ok()?;
     Some(Worktree {
-        repo: main_checkout(&path).ok()?,
         base: git(&path, &["rev-parse", "HEAD"]).ok()?.trim().to_string(),
         path,
         branch,
+        checkout: repo.clone(),
+        repo,
         left_out_uncommitted: false,
         reused: true,
+        checkout_head,
+        checkout_branch,
     })
+}
+
+/// A checkout's HEAD commit and branch.
+fn position(checkout: &Path) -> Result<(String, String), String> {
+    Ok((
+        git(checkout, &["rev-parse", "HEAD"])?.trim().to_string(),
+        git(checkout, &["branch", "--show-current"])?.trim().to_string(),
+    ))
+}
+
+/// How the user's checkout moved while the run had its worktree: a switched
+/// branch or a new HEAD means the agent worked there instead.
+pub fn checkout_change(worktree: &Worktree) -> Option<String> {
+    let (head, branch) = position(&worktree.checkout).ok()?;
+    let name = |branch: &str| match branch {
+        "" => "a detached HEAD".to_string(),
+        branch => format!("branch {branch}"),
+    };
+    if branch != worktree.checkout_branch {
+        Some(format!(
+            "it's on {} now, not {}",
+            name(&branch),
+            name(&worktree.checkout_branch)
+        ))
+    } else if head != worktree.checkout_head {
+        Some(format!(
+            "its HEAD moved from {} to {}",
+            &worktree.checkout_head[..7],
+            &head[..7]
+        ))
+    } else {
+        None
+    }
 }
 
 /// Commits whatever a finished write run left uncommitted, on the worktree's

@@ -302,7 +302,7 @@ fn print_state(dir: &RunDir, state: &State, json: bool, waited: u64) -> Result<E
     if json {
         print!(
             "{}",
-            report::state_json(record, state, dir.path(), dir.worktree_state().as_ref())
+            report::state_json(record, state, dir.path(), dir.worktree_report().as_ref())
         );
     }
     Ok(match state {
@@ -310,7 +310,7 @@ fn print_state(dir: &RunDir, state: &State, json: bool, waited: u64) -> Result<E
             if !json {
                 print!(
                     "{}",
-                    report::done(record, session.as_deref(), message, dir.worktree_state().as_ref())
+                    report::done(record, session.as_deref(), message, dir.worktree_report().as_ref())
                 );
             }
             ExitCode::SUCCESS
@@ -319,7 +319,7 @@ fn print_state(dir: &RunDir, state: &State, json: bool, waited: u64) -> Result<E
             if !json {
                 eprint!(
                     "{}",
-                    report::failed(record, error, dir.path(), dir.worktree_state().as_ref())
+                    report::failed(record, error, dir.path(), dir.worktree_report().as_ref())
                 );
             }
             ExitCode::FAILURE
@@ -328,7 +328,7 @@ fn print_state(dir: &RunDir, state: &State, json: bool, waited: u64) -> Result<E
             if !json {
                 eprint!(
                     "{}",
-                    report::limited(record, error, dir.path(), dir.worktree_state().as_ref())
+                    report::limited(record, error, dir.path(), dir.worktree_report().as_ref())
                 );
             }
             ExitCode::from(LIMITED)
@@ -337,7 +337,7 @@ fn print_state(dir: &RunDir, state: &State, json: bool, waited: u64) -> Result<E
             if !json {
                 eprint!(
                     "{}",
-                    report::cancelled(record, reason, dir.path(), dir.worktree_state().as_ref())
+                    report::cancelled(record, reason, dir.path(), dir.worktree_report().as_ref())
                 );
             }
             ExitCode::FAILURE
